@@ -6,7 +6,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="DesktopKeyboard.Tests\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Update="keyboard.ico">

@@ -38,10 +38,16 @@ namespace DesktopKeyboard
         public MainWindow()
         {
             InitializeComponent();
-            Automation.AddAutomationFocusChangedEventHandler(OnFocusChanged);
 
             _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _hideTimer.Tick += HideTimer_Tick;
+
+            // Defer UIA registration until after the window is shown — initializing
+            // the UIA COM infrastructure on the UI thread blocks startup for several seconds.
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
+            {
+                Automation.AddAutomationFocusChangedEventHandler(OnFocusChanged);
+            });
         }
 
         protected override void OnSourceInitialized(EventArgs e)

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="DesktopKeyboard"/>
+
+  <!--
+    uiAccess="true" allows this window to float above shell UI (Start menu, Action Center, etc.)
+    Requirements for this to take effect at runtime:
+      1. The executable must be digitally signed with a trusted certificate.
+      2. The executable must reside in a trusted location (Program Files, Windows dir).
+    The installer already satisfies requirement 2. For development builds running from
+    the repo, uiAccess is silently ignored by Windows — behaviour is unchanged from before.
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="asInvoker" uiAccess="true"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>

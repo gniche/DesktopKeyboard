@@ -1,6 +1,5 @@
 <Solution>
   <Project Path="DesktopKeyboard.csproj" />
-  <Project Path="desktop_keyboard_setup/desktop_keyboard_setup.vdproj" Type="Installer">
-    <Build />
-  </Project>
+  <Project Path="DesktopKeyboard.Tests/DesktopKeyboard.Tests.csproj" />
+  <Project Path="DesktopKeyboard.Installer/Package.wxs" />
 </Solution>

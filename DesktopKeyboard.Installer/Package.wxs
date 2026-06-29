@@ -1,0 +1,135 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="DesktopKeyboard"
+           Manufacturer="serifpersia"
+           Version="1.0.0"
+           UpgradeCode="710E520F-B697-4FDB-805C-05808DE1F7BD"
+           Scope="perMachine">
+
+    <!--
+      AllowSameVersionUpgrades lets re-running the same installer act as a repair/reinstall
+      instead of MSI's default "already installed" refusal (ERROR_PRODUCT_VERSION).
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of DesktopKeyboard is already installed."
+                  AllowSameVersionUpgrades="yes" />
+
+    <!--
+      Closes the running app (via WM_CLOSE, falling back to Restart Manager) before files
+      are replaced, so install/upgrade/uninstall never hits the "files in use" blocker.
+      Sequence="both" (the default) runs this on install and uninstall.
+    -->
+    <util:CloseApplication Id="CloseDesktopKeyboard"
+                            Target="DesktopKeyboard.exe"
+                            CloseMessage="yes"
+                            RebootPrompt="no"
+                            ElevatedCloseMessage="yes" />
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="DesktopKeyboard" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <Shortcut Id="DesktopSC"
+                  Name="DesktopKeyboard"
+                  Target="[INSTALLFOLDER]DesktopKeyboard.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="KeyboardIcon" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\serifpersia\DesktopKeyboard"
+                       Name="DesktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <Shortcut Id="StartMenuSC"
+                  Name="DesktopKeyboard"
+                  Target="[INSTALLFOLDER]DesktopKeyboard.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="KeyboardIcon" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\serifpersia\DesktopKeyboard"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Icon Id="KeyboardIcon" SourceFile="..\keyboard.ico" />
+
+    <!--
+      Cert installation custom actions.
+      certutil must write to LocalMachine\Root, which requires running without user
+      impersonation (Impersonate="no") even though the package itself installs elevated,
+      since by default MSI exe custom actions run impersonated as the installing user and
+      get ERROR_ACCESS_DENIED against machine-wide cert stores. Execute="deferred" is
+      required for Impersonate="no" to take effect; formatted strings like [INSTALLFOLDER]
+      are resolved at schedule time, before the deferred action actually runs.
+      Root             — required for uiAccess="true" to work system-wide.
+      TrustedPublisher — suppresses SmartScreen warnings when launching the exe.
+      Return="ignore" so a pre-existing cert does not abort the install.
+    -->
+    <CustomAction Id="InstallCertRoot"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='"[System64Folder]certutil.exe" -addstore -f Root "[INSTALLFOLDER]DesktopKeyboard.cer"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="InstallCertTP"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='"[System64Folder]certutil.exe" -addstore -f TrustedPublisher "[INSTALLFOLDER]DesktopKeyboard.cer"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="InstallCertRoot" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="InstallCertTP" After="InstallCertRoot" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="ExeFile" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+        <File Id="MainExe"
+              Source="..\bin\Release\net9.0-windows\DesktopKeyboard.exe"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="DllFile" Guid="D4E5F6A7-B8C9-0123-DEF0-234567890123">
+        <File Source="..\bin\Release\net9.0-windows\DesktopKeyboard.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="RuntimeConfig" Guid="E5F6A7B8-C9D0-1234-EF01-345678901234">
+        <File Source="..\bin\Release\net9.0-windows\DesktopKeyboard.runtimeconfig.json" KeyPath="yes" />
+      </Component>
+      <Component Id="DepsJson" Guid="F6A7B8C9-D0E1-2345-F012-456789012345">
+        <File Source="..\bin\Release\net9.0-windows\DesktopKeyboard.deps.json" KeyPath="yes" />
+      </Component>
+      <Component Id="IconFile" Guid="A7B8C9D0-E1F2-3456-0123-567890123456">
+        <File Source="..\keyboard.ico" KeyPath="yes" />
+      </Component>
+      <Component Id="CertFile" Guid="B8C9D0E1-F2A3-4567-1234-678901234567">
+        <File Id="CertFileId"
+              Source="DesktopKeyboard.cer"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>
