@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -25,13 +25,29 @@ namespace DesktopKeyboard
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
         private const uint KEYEVENTF_KEYUP = 0x0002;
-        private const byte VK_LSHIFT = 0xA0;
+        private const byte VK_LSHIFT   = 0xA0;
         private const byte VK_LCONTROL = 0xA2;
+        private const byte VK_LMENU    = 0xA4;
+        private const byte VK_LWIN     = 0x5B;
 
-        private int currentSizeState = 1;
+        private static readonly Color ActiveColor   = Color.FromRgb(74, 144, 226);
+        private static readonly Color InactiveColor = Color.FromRgb(37, 37, 37);
+
+        private int currentSizeState   = 1;
+        private int currentLayoutState = 0;
         private bool isShiftActive = false;
-        private bool isCtrlActive = false;
+        private bool isCtrlActive  = false;
+        private bool isAltActive   = false;
         private bool isManuallyHidden = false;
+
+        private readonly string[] layoutNames = { "⌨ Base", "⌨ Nav", "⌨ Fn", "⌨ Full" };
+        private readonly (double W, double H)[] layoutSizes =
+        {
+            (850,  360),
+            (850,  360),
+            (850,  360),
+            (1150, 360),
+        };
 
         private readonly DispatcherTimer _hideTimer;
 
@@ -193,10 +209,35 @@ namespace DesktopKeyboard
             currentSizeState = (currentSizeState + 1) % 3;
             switch (currentSizeState)
             {
-                case 0: this.Width = 600; this.Height = 254; break;
-                case 1: this.Width = 850; this.Height = 360; break;
+                case 0: this.Width = 600;  this.Height = 254; break;
+                case 1: this.Width = 850;  this.Height = 360; break;
                 case 2: this.Width = 1200; this.Height = 508; break;
             }
+        }
+
+        private void LayoutButton_Click(object sender, RoutedEventArgs e)
+        {
+            currentLayoutState = (currentLayoutState + 1) % 4;
+
+            Layout1Panel.Visibility = currentLayoutState == 0 ? Visibility.Visible : Visibility.Collapsed;
+            Layout2Panel.Visibility = currentLayoutState == 1 ? Visibility.Visible : Visibility.Collapsed;
+            Layout3Panel.Visibility = currentLayoutState == 2 ? Visibility.Visible : Visibility.Collapsed;
+            Layout4Panel.Visibility = currentLayoutState == 3 ? Visibility.Visible : Visibility.Collapsed;
+
+            BtnLayout.Content = layoutNames[currentLayoutState];
+
+            var (w, h) = layoutSizes[currentLayoutState];
+            MainBorder.Width  = w;
+            MainBorder.Height = h;
+
+            // Reset modifiers when changing layouts so they aren't stuck active on a hidden panel
+            isShiftActive = false;
+            isCtrlActive  = false;
+            isAltActive   = false;
+            UpdateKeys(this, false);
+            SetModifierButtonColor("TOGGLE_SHIFT", InactiveColor);
+            SetModifierButtonColor("TOGGLE_CTRL",  InactiveColor);
+            SetModifierButtonColor("TOGGLE_ALT",   InactiveColor);
         }
 
         private void Key_Click(object sender, RoutedEventArgs e)
@@ -208,9 +249,7 @@ namespace DesktopKeyboard
                 if (tag == "TOGGLE_SHIFT")
                 {
                     isShiftActive = !isShiftActive;
-                    BtnShift.Background = new SolidColorBrush(isShiftActive
-                        ? Color.FromRgb(74, 144, 226)
-                        : Color.FromRgb(37, 37, 37));
+                    SetModifierButtonColor("TOGGLE_SHIFT", isShiftActive ? ActiveColor : InactiveColor);
                     UpdateKeys(this, isShiftActive);
                     return;
                 }
@@ -218,9 +257,21 @@ namespace DesktopKeyboard
                 if (tag == "TOGGLE_CTRL")
                 {
                     isCtrlActive = !isCtrlActive;
-                    BtnCtrl.Background = new SolidColorBrush(isCtrlActive
-                        ? Color.FromRgb(74, 144, 226)
-                        : Color.FromRgb(37, 37, 37));
+                    SetModifierButtonColor("TOGGLE_CTRL", isCtrlActive ? ActiveColor : InactiveColor);
+                    return;
+                }
+
+                if (tag == "TOGGLE_ALT")
+                {
+                    isAltActive = !isAltActive;
+                    SetModifierButtonColor("TOGGLE_ALT", isAltActive ? ActiveColor : InactiveColor);
+                    return;
+                }
+
+                if (tag == "WIN")
+                {
+                    keybd_event(VK_LWIN, 0, 0, 0);
+                    keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
                     return;
                 }
 
@@ -228,14 +279,32 @@ namespace DesktopKeyboard
                 if (vk != 0)
                 {
                     if (isCtrlActive) keybd_event(VK_LCONTROL, 0, 0, 0);
+                    if (isAltActive)  keybd_event(VK_LMENU, 0, 0, 0);
                     if (isShiftActive) keybd_event(VK_LSHIFT, 0, 0, 0);
 
                     keybd_event(vk, 0, 0, 0);
                     keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
 
                     if (isShiftActive) keybd_event(VK_LSHIFT, 0, KEYEVENTF_KEYUP, 0);
+                    if (isAltActive)  keybd_event(VK_LMENU, 0, KEYEVENTF_KEYUP, 0);
                     if (isCtrlActive) keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0);
                 }
+            }
+        }
+
+        private void SetModifierButtonColor(string tag, Color color)
+        {
+            ApplyColorToTag(this, tag, new SolidColorBrush(color));
+        }
+
+        private void ApplyColorToTag(DependencyObject parent, string tag, Brush brush)
+        {
+            foreach (object child in LogicalTreeHelper.GetChildren(parent))
+            {
+                if (child is Button btn && btn.Tag?.ToString() == tag)
+                    btn.Background = brush;
+                else if (child is DependencyObject dep)
+                    ApplyColorToTag(dep, tag, brush);
             }
         }
 
@@ -247,13 +316,6 @@ namespace DesktopKeyboard
                 {
                     string tag = btn.Tag.ToString() ?? "";
 
-                    if (tag.StartsWith("TOGGLE") ||
-                        tag == "BACK" || tag == "ENTER" || tag == "SPACE" ||
-                        tag == "UP" || tag == "DOWN" || tag == "LEFT" || tag == "RIGHT")
-                    {
-                        continue;
-                    }
-
                     if (tag.Length == 1 && char.IsLetter(tag[0]))
                     {
                         btn.Content = isShifted ? tag.ToUpper() : tag.ToLower();
@@ -262,10 +324,11 @@ namespace DesktopKeyboard
                     {
                         btn.Content = isShifted ? GetShiftedNumber(tag[0]) : tag;
                     }
-                    else
+                    else if (tag == "COMMA" || tag == "PERIOD" || tag == "SLASH")
                     {
                         btn.Content = isShifted ? GetShiftedSymbol(tag) : GetNormalSymbol(tag);
                     }
+                    // all other tags (BACK, ENTER, SPACE, arrows, toggles, F-keys, nav, numpad): leave content as-is
                 }
                 else if (child is DependencyObject depObj)
                 {
@@ -313,6 +376,7 @@ namespace DesktopKeyboard
                 _ => tag
             };
         }
+
         private byte GetVirtualKeyCode(string keyTag)
         {
             if (keyTag.Length == 1)
@@ -325,15 +389,56 @@ namespace DesktopKeyboard
             return keyTag switch
             {
                 "BACK" => 0x08,
+                "TAB" => 0x09,
                 "ENTER" => 0x0D,
+                "ESC" => 0x1B,
                 "SPACE" => 0x20,
                 "COMMA" => 0xBC,
                 "PERIOD" => 0xBE,
                 "SLASH" => 0xBF,
-                "UP" => 0x26,
-                "DOWN" => 0x28,
+
                 "LEFT" => 0x25,
+                "UP" => 0x26,
                 "RIGHT" => 0x27,
+                "DOWN" => 0x28,
+
+                "PGUP" => 0x21,
+                "PGDN" => 0x22,
+                "END" => 0x23,
+                "HOME" => 0x24,
+                "INS" => 0x2D,
+                "DEL" => 0x2E,
+
+                "F1" => 0x70,
+                "F2" => 0x71,
+                "F3" => 0x72,
+                "F4" => 0x73,
+                "F5" => 0x74,
+                "F6" => 0x75,
+                "F7" => 0x76,
+                "F8" => 0x77,
+                "F9" => 0x78,
+                "F10" => 0x79,
+                "F11" => 0x7A,
+                "F12" => 0x7B,
+
+                "NUMLK" => 0x90,
+                "NUMSLASH" => 0x6F,
+                "NUMSTAR" => 0x6A,
+                "NUMMINUS" => 0x6D,
+                "NUMPLUS" => 0x6B,
+                "NUM0" => 0x60,
+                "NUM1" => 0x61,
+                "NUM2" => 0x62,
+                "NUM3" => 0x63,
+                "NUM4" => 0x64,
+                "NUM5" => 0x65,
+                "NUM6" => 0x66,
+                "NUM7" => 0x67,
+                "NUM8" => 0x68,
+                "NUM9" => 0x69,
+                "NUMDOT" => 0x6E,
+
                 _ => 0
             };
         }

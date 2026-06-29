@@ -48,6 +48,33 @@ if (-not $SkipSign) {
     Write-Host "Exported cert to $cerPath" -ForegroundColor Green
 }
 
+# --- Sign the exe BEFORE packaging --------------------------------------------
+# The installer bundles the exe as-is, and uiAccess="true" requires the *installed*
+# exe to be signed. So the exe must be signed before wix packages it into the MSI,
+# otherwise the MSI ships an unsigned exe and Windows rejects the launch with
+# "A referral was returned from the server".
+
+$exePath = "$root\bin\$Configuration\net9.0-windows\DesktopKeyboard.exe"
+
+function Sign-Artifact($path) {
+    Write-Host "Signing $path ..." -ForegroundColor Cyan
+    $result = Set-AuthenticodeSignature `
+        -FilePath        $path `
+        -Certificate     $cert `
+        -TimestampServer "http://timestamp.digicert.com" `
+        -HashAlgorithm   SHA256
+    if ($result.Status -notin "Valid", "UnknownError") {
+        Write-Error "Signing failed for ${path} -- status: $($result.Status) -- $($result.StatusMessage)"
+    }
+    Write-Host "  Signed ($($result.Status))" -ForegroundColor Green
+}
+
+if ($SkipSign) {
+    Write-Host "Skipping exe signing (-SkipSign)." -ForegroundColor Yellow
+} else {
+    Sign-Artifact $exePath
+}
+
 # --- Build installer ---------------------------------------------------------
 
 Write-Host "Building installer..." -ForegroundColor Cyan
@@ -62,28 +89,12 @@ wix build "$root\DesktopKeyboard.Installer\Package.wxs" `
     -o "$outDir\DesktopKeyboard_Setup.msi"
 if (-not $?) { exit 1 }
 
-# --- Sign artifacts ----------------------------------------------------------
+# --- Sign the installer ------------------------------------------------------
 
 if ($SkipSign) {
-    Write-Host "Skipping signing (-SkipSign)." -ForegroundColor Yellow
+    Write-Host "Skipping installer signing (-SkipSign)." -ForegroundColor Yellow
 } else {
-    $artifacts = @(
-        "$root\bin\$Configuration\net9.0-windows\DesktopKeyboard.exe",
-        "$outDir\DesktopKeyboard_Setup.msi"
-    )
-
-    foreach ($artifact in $artifacts) {
-        Write-Host "Signing $artifact ..." -ForegroundColor Cyan
-        $result = Set-AuthenticodeSignature `
-            -FilePath        $artifact `
-            -Certificate     $cert `
-            -TimestampServer "http://timestamp.digicert.com" `
-            -HashAlgorithm   SHA256
-        if ($result.Status -notin "Valid", "UnknownError") {
-            Write-Error "Signing failed for ${artifact} -- status: $($result.Status) -- $($result.StatusMessage)"
-        }
-        Write-Host "  Signed ($($result.Status))" -ForegroundColor Green
-    }
+    Sign-Artifact "$outDir\DesktopKeyboard_Setup.msi"
 }
 
 Write-Host ""
