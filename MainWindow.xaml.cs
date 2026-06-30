@@ -94,14 +94,6 @@ namespace DesktopKeyboard
         private const string RunKey      = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValue    = "DesktopKeyboard";
 
-        private readonly (double W, double H)[] layoutSizes =
-        {
-            (850,  360),
-            (850,  360),
-            (850,  360),
-            (1150, 360),
-        };
-
         private readonly DispatcherTimer _hideTimer;
 
         public MainWindow()
@@ -278,24 +270,24 @@ namespace DesktopKeyboard
 
         private void LayoutButton_Click(object sender, RoutedEventArgs e)
         {
-            SetLayout((currentLayoutState + 1) % 4);
+            SetLayout((currentLayoutState + 1) % 2);
             SaveSettings();
         }
 
+        // Two layouts: 0 = Base (keyboard incl. nav keys), 1 = Full (Base + numpad).
+        // F-keys are reached via the Fn modifier, so there's no dedicated F-key row.
         private void SetLayout(int state)
         {
             currentLayoutState = state;
+            bool full = state == 1;
 
-            Layout1Panel.Visibility = currentLayoutState == 0 ? Visibility.Visible : Visibility.Collapsed;
-            Layout2Panel.Visibility = currentLayoutState == 1 ? Visibility.Visible : Visibility.Collapsed;
-            Layout3Panel.Visibility = currentLayoutState == 2 ? Visibility.Visible : Visibility.Collapsed;
-            Layout4Panel.Visibility = currentLayoutState == 3 ? Visibility.Visible : Visibility.Collapsed;
+            NumpadCol.Width       = full ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+            NumpadGrid.Visibility = full ? Visibility.Visible : Visibility.Collapsed;
 
-            var (w, h) = layoutSizes[currentLayoutState];
-            MainBorder.Width  = w;
-            MainBorder.Height = h;
+            // Widen the design surface when the numpad is shown (Viewbox scales it to fit).
+            MainBorder.Width = full ? 1150 : 850;
 
-            // Reset modifiers when changing layouts so they aren't stuck active on a hidden panel
+            // Reset modifiers when changing layouts so they aren't left stuck active.
             foreach (var t in ModTags) SetModState(t, ModState.Off);
         }
 
@@ -644,7 +636,7 @@ namespace DesktopKeyboard
                 currentOpacity    = savedOpacity;
                 ApplyTheme();
 
-                SetLayout(Math.Clamp(savedLayout, 0, 3));
+                SetLayout(Math.Clamp(savedLayout, 0, 1));
                 SetSize(Math.Clamp(savedSize, 0, 2));
 
                 currentMode = (KeyboardMode)Math.Clamp(savedMode, 0, 2);
