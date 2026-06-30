@@ -60,6 +60,13 @@ namespace DesktopKeyboard
 
         private static readonly Color LockColor = Color.FromRgb(210, 140, 30); // amber = locked
 
+        // Frozen, shared brushes for the modifier highlight states — avoids allocating a new
+        // brush on every modifier toggle and lets the render thread skip change tracking.
+        private static readonly Brush ActiveBrush = Freeze(new SolidColorBrush(ActiveColor));
+        private static readonly Brush LockBrush   = Freeze(new SolidColorBrush(LockColor));
+
+        private static Brush Freeze(SolidColorBrush b) { b.Freeze(); return b; }
+
         private static readonly string[] ModTags =
             { "TOGGLE_SHIFT", "TOGGLE_CTRL", "TOGGLE_ALT", "TOGGLE_WIN", "TOGGLE_FN" };
 
@@ -100,6 +107,12 @@ namespace DesktopKeyboard
 
         private readonly DispatcherTimer _hideTimer;
 
+        // Every tagged button, indexed by Tag, built once after InitializeComponent. Lets the
+        // modifier/label updates touch keys directly instead of re-walking the logical tree on
+        // each keystroke. Tags are unique except ENTER (main + numpad), hence a list per tag.
+        private readonly List<Button> _allButtons = new();
+        private readonly Dictionary<string, List<Button>> _byTag = new();
+
         public MainWindow()
         {
             InitializeComponent();
@@ -107,6 +120,7 @@ namespace DesktopKeyboard
             _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _hideTimer.Tick += HideTimer_Tick;
 
+            BuildButtonCache(this);
             _longPressTimer.Tick += LongPress_Tick;
             AttachModifierHandlers();
 
@@ -166,17 +180,22 @@ namespace DesktopKeyboard
             AutomationElement? fe = AutomationElement.FocusedElement;
             if (fe == null) return;
 
-            Dispatcher.Invoke(() =>
+            // BeginInvoke (not Invoke) so the UI Automation callback thread isn't blocked
+            // waiting on the UI thread for every system-wide focus change.
+            Dispatcher.BeginInvoke(() =>
             {
                 if (IsEditableTextField(fe))
                 {
                     _hideTimer.Stop();
 
+                    // Only re-assert z-order on an actual hidden -> visible transition;
+                    // tabbing between fields while already visible needs no extra work.
                     if (this.Visibility != Visibility.Visible)
+                    {
                         this.Visibility = Visibility.Visible;
-
-                    MakeTopmost(new WindowInteropHelper(this).Handle);
-                    BringModeButtonToFront();
+                        MakeTopmost(new WindowInteropHelper(this).Handle);
+                        BringModeButtonToFront();
+                    }
                 }
                 else if (this.Visibility == Visibility.Visible)
                 {
@@ -551,17 +570,26 @@ namespace DesktopKeyboard
 
             // Opacity applies to the panel, border, and the keys themselves (but not the
             // glyphs — those keep their black halo so they stay readable when translucent).
-            MainBorder.Background  = new SolidColorBrush(panelColor)  { Opacity = currentOpacity };
-            MainBorder.BorderBrush = new SolidColorBrush(borderColor) { Opacity = currentOpacity };
+            // Brushes are frozen so the render thread can skip change-tracking; they're never
+            // mutated after creation (theme changes swap in fresh brushes).
+            MainBorder.Background  = FrozenBrush(panelColor,  currentOpacity);
+            MainBorder.BorderBrush = FrozenBrush(borderColor, currentOpacity);
 
             // Replace the resource entry rather than mutating the brush: brushes referenced
             // by DynamicResource get frozen by WPF, and mutating a frozen brush throws.
             // Swapping the entry re-resolves every DynamicResource reference safely.
-            Resources["KeyBg"] = new SolidColorBrush(keyColor) { Opacity = currentOpacity };
+            Resources["KeyBg"] = FrozenBrush(keyColor, currentOpacity);
 
             // Match the floating mode button to the keys.
             if (_modeButton != null)
-                _modeButton.Background = new SolidColorBrush(keyColor) { Opacity = currentOpacity };
+                _modeButton.Background = FrozenBrush(keyColor, currentOpacity);
+        }
+
+        private static Brush FrozenBrush(Color c, double opacity)
+        {
+            var b = new SolidColorBrush(c) { Opacity = opacity };
+            b.Freeze();
+            return b;
         }
 
         private static Color HsvToColor(double h, double s, double v)
@@ -776,18 +804,19 @@ namespace DesktopKeyboard
             _mod[tag] = state;
 
             // Off -> themed key brush; OneShot -> accent; Locked -> amber.
-            ApplyToTag(this, tag, btn =>
-            {
-                switch (state)
+            if (_byTag.TryGetValue(tag, out var buttons))
+                foreach (var btn in buttons)
                 {
-                    case ModState.Off:     btn.ClearValue(Button.BackgroundProperty); break;
-                    case ModState.OneShot: btn.Background = new SolidColorBrush(ActiveColor); break;
-                    case ModState.Locked:  btn.Background = new SolidColorBrush(LockColor); break;
+                    switch (state)
+                    {
+                        case ModState.Off:     btn.ClearValue(Button.BackgroundProperty); break;
+                        case ModState.OneShot: btn.Background = ActiveBrush; break;
+                        case ModState.Locked:  btn.Background = LockBrush;   break;
+                    }
                 }
-            });
 
             // Shift and Fn both change key labels.
-            if (tag == "TOGGLE_SHIFT" || tag == "TOGGLE_FN") UpdateKeys(this);
+            if (tag == "TOGGLE_SHIFT" || tag == "TOGGLE_FN") UpdateKeys();
         }
 
         private void ConsumeOneShotModifiers()
@@ -844,14 +873,14 @@ namespace DesktopKeyboard
         {
             foreach (var t in ModTags)
             {
-                ApplyToTag(this, t, btn =>
+                if (!_byTag.TryGetValue(t, out var buttons)) continue;
+                foreach (var btn in buttons)
                 {
-                    string? bt = btn.Tag?.ToString();
-                    btn.PreviewMouseLeftButtonDown += (s, e) => StartLongPress(bt);
+                    btn.PreviewMouseLeftButtonDown += (s, e) => StartLongPress(t);
                     btn.PreviewMouseLeftButtonUp   += (s, e) => StopLongPress();
-                    btn.PreviewTouchDown           += (s, e) => StartLongPress(bt);
+                    btn.PreviewTouchDown           += (s, e) => StartLongPress(t);
                     btn.PreviewTouchUp             += (s, e) => StopLongPress();
-                });
+                }
             }
         }
 
@@ -884,44 +913,43 @@ namespace DesktopKeyboard
             }
         }
 
-        private void ApplyToTag(DependencyObject parent, string tag, Action<Button> action)
+        // Walk the logical tree once at startup to index every tagged button by Tag.
+        private void BuildButtonCache(DependencyObject parent)
         {
             foreach (object child in LogicalTreeHelper.GetChildren(parent))
             {
-                if (child is Button btn && btn.Tag?.ToString() == tag)
-                    action(btn);
-                else if (child is DependencyObject dep)
-                    ApplyToTag(dep, tag, action);
+                if (child is Button btn && btn.Tag is string tag)
+                {
+                    _allButtons.Add(btn);
+                    if (!_byTag.TryGetValue(tag, out var list))
+                        _byTag[tag] = list = new List<Button>();
+                    list.Add(btn);
+                }
+                if (child is DependencyObject dep)
+                    BuildButtonCache(dep);
             }
         }
 
-        private void UpdateKeys(DependencyObject parent)
+        private void UpdateKeys()
         {
             bool isShifted = _mod["TOGGLE_SHIFT"] != ModState.Off;
             bool isFn      = _mod["TOGGLE_FN"]    != ModState.Off;
 
-            foreach (object child in LogicalTreeHelper.GetChildren(parent))
+            foreach (var btn in _allButtons)
             {
-                if (child is Button btn && btn.Tag != null)
-                {
-                    string tag = btn.Tag.ToString() ?? "";
+                string tag = (string)btn.Tag;
 
-                    if (tag == "BACK")
-                        btn.Content = isFn ? "Del" : "⌫";   // Fn turns Backspace into Delete
-                    else if (isFn && FnMap.TryGetValue(tag, out var fm))
-                        btn.Content = fm.Label;
-                    else if (tag.Length == 1 && char.IsLetter(tag[0]))
-                        btn.Content = isShifted ? tag.ToUpper() : tag.ToLower();
-                    else if (tag.Length == 1 && char.IsDigit(tag[0]))
-                        btn.Content = isShifted ? GetShiftedNumber(tag[0]) : tag;
-                    else if (Punct.TryGetValue(tag, out var p))
-                        btn.Content = isShifted ? p.Shifted : p.Normal;
-                    // other tags (ENTER, SPACE, arrows, toggles, nav, numpad): leave content as-is
-                }
-                else if (child is DependencyObject depObj)
-                {
-                    UpdateKeys(depObj);
-                }
+                if (tag == "BACK")
+                    btn.Content = isFn ? "Del" : "⌫";   // Fn turns Backspace into Delete
+                else if (isFn && FnMap.TryGetValue(tag, out var fm))
+                    btn.Content = fm.Label;
+                else if (tag.Length == 1 && char.IsLetter(tag[0]))
+                    btn.Content = isShifted ? tag.ToUpper() : tag.ToLower();
+                else if (tag.Length == 1 && char.IsDigit(tag[0]))
+                    btn.Content = isShifted ? GetShiftedNumber(tag[0]) : tag;
+                else if (Punct.TryGetValue(tag, out var p))
+                    btn.Content = isShifted ? p.Shifted : p.Normal;
+                // other tags (ENTER, SPACE, arrows, toggles, nav, numpad): leave content as-is
             }
         }
 

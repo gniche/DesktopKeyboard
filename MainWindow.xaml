@@ -23,12 +23,26 @@
                                  release. A per-button overlay (not the shared Background brush) avoids
                                  the touch "stuck highlight" since it doesn't depend on IsMouseOver. -->
                             <Border x:Name="PressHighlight" Background="#40FFFFFF" CornerRadius="6" Opacity="0"/>
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3">
-                                <!-- Black halo keeps white glyphs readable even when keys are translucent -->
-                                <ContentPresenter.Effect>
-                                    <DropShadowEffect Color="Black" BlurRadius="4" ShadowDepth="0" Opacity="1" RenderingBias="Quality"/>
-                                </ContentPresenter.Effect>
-                            </ContentPresenter>
+                            <!-- Black outline keeps white glyphs readable even when keys are translucent.
+                                 Four 1px-offset black copies of the glyph form the outline. This is pure
+                                 text drawing with NO pixel-shader Effect: a BlurEffect/DropShadowEffect
+                                 here forces an offscreen render pass per key, re-rasterized under the
+                                 Viewbox scale on every press-animation frame — the cause of high CPU. -->
+                            <Grid Margin="0,0,0,3" TextElement.Foreground="Black">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="-1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="-1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
+                            </Grid>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsPressed" Value="True">
