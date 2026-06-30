@@ -738,29 +738,34 @@ namespace DesktopKeyboard
                 // Fn remaps the number row to F1-F12 (and Backspace to Delete) while active.
                 if (_mod["TOGGLE_FN"] != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
 
-                if (vk != 0)
-                {
-                    bool ctrl  = _mod["TOGGLE_CTRL"]  != ModState.Off;
-                    bool alt   = _mod["TOGGLE_ALT"]   != ModState.Off;
-                    bool shift = _mod["TOGGLE_SHIFT"] != ModState.Off;
-                    bool win   = _mod["TOGGLE_WIN"]   != ModState.Off;
-
-                    if (ctrl)  keybd_event(VK_LCONTROL, 0, 0, 0);
-                    if (alt)   keybd_event(VK_LMENU, 0, 0, 0);
-                    if (shift) keybd_event(VK_LSHIFT, 0, 0, 0);
-                    if (win)   keybd_event(VK_LWIN, 0, 0, 0);
-
-                    keybd_event(vk, 0, 0, 0);
-                    keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
-
-                    if (win)   keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
-                    if (shift) keybd_event(VK_LSHIFT, 0, KEYEVENTF_KEYUP, 0);
-                    if (alt)   keybd_event(VK_LMENU, 0, KEYEVENTF_KEYUP, 0);
-                    if (ctrl)  keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0);
-
-                    ConsumeOneShotModifiers();
-                }
+                if (vk != 0) SendKey(vk);
             }
+        }
+
+        // Sends a keypress wrapped in whatever modifiers are currently active, then clears
+        // any one-shot modifiers. The active modifiers are held down around the key event so
+        // combos like Ctrl+C or Win+E reach the target app.
+        private void SendKey(byte vk)
+        {
+            bool ctrl  = _mod["TOGGLE_CTRL"]  != ModState.Off;
+            bool alt   = _mod["TOGGLE_ALT"]   != ModState.Off;
+            bool shift = _mod["TOGGLE_SHIFT"] != ModState.Off;
+            bool win   = _mod["TOGGLE_WIN"]   != ModState.Off;
+
+            if (ctrl)  keybd_event(VK_LCONTROL, 0, 0, 0);
+            if (alt)   keybd_event(VK_LMENU, 0, 0, 0);
+            if (shift) keybd_event(VK_LSHIFT, 0, 0, 0);
+            if (win)   keybd_event(VK_LWIN, 0, 0, 0);
+
+            keybd_event(vk, 0, 0, 0);
+            keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
+
+            if (win)   keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+            if (shift) keybd_event(VK_LSHIFT, 0, KEYEVENTF_KEYUP, 0);
+            if (alt)   keybd_event(VK_LMENU, 0, KEYEVENTF_KEYUP, 0);
+            if (ctrl)  keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0);
+
+            ConsumeOneShotModifiers();
         }
 
         // --- Modifier state machine ------------------------------------------
@@ -920,22 +925,11 @@ namespace DesktopKeyboard
             }
         }
 
-        private string GetShiftedNumber(char c)
+        private static string GetShiftedNumber(char c)
         {
-            return c switch
-            {
-                '1' => "!",
-                '2' => "@",
-                '3' => "#",
-                '4' => "$",
-                '5' => "%",
-                '6' => "^",
-                '7' => "&",
-                '8' => "*",
-                '9' => "(",
-                '0' => ")",
-                _ => c.ToString()
-            };
+            const string digits = "1234567890", shifted = "!@#$%^&*()";
+            int i = digits.IndexOf(c);
+            return i >= 0 ? shifted[i].ToString() : c.ToString();
         }
 
         private static byte GetVirtualKeyCode(string keyTag)
