@@ -9,7 +9,6 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Effects;
 using System.Windows.Threading;
 
 namespace DesktopKeyboard
@@ -90,6 +89,7 @@ namespace DesktopKeyboard
         private Window? _modeWindow;
         private Button? _modeButton;
         private TextBlock? _modeText;
+        private TextBlock[] _modeOutline = Array.Empty<TextBlock>();
         private const double ModeBtnW = 96;
         private const double ModeBtnH = 32;
         private bool _modeDragging;
@@ -321,7 +321,9 @@ namespace DesktopKeyboard
             MainBorder.Width = full ? 1150 : 850;
 
             // Reset modifiers when changing layouts so they aren't left stuck active.
-            foreach (var t in ModTags) SetModState(t, ModState.Off);
+            // Suppress per-state relabeling and do a single UpdateKeys pass afterwards.
+            foreach (var t in ModTags) SetModState(t, ModState.Off, updateLabels: false);
+            UpdateKeys();
         }
 
         // --- Hue / Opacity theming -------------------------------------------
@@ -338,22 +340,24 @@ namespace DesktopKeyboard
             this.Left = wa.Left + (wa.Width - this.Width) / 2;
             this.Top  = wa.Bottom - this.Height - 40;
 
-            // White label with a black halo so it stays readable on a translucent key.
-            _modeText = new TextBlock
+            // White label with a black 1px-offset outline (four black copies under a white
+            // top copy). Pure text, no shader Effect — same cheap technique as the keys.
+            _modeText = MakeModeLabel(Brushes.White, 0, 0);
+            _modeOutline = new[]
             {
-                Text = "Auto",
-                FontSize = 15,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 4, ShadowDepth = 0, Opacity = 1 }
+                MakeModeLabel(Brushes.Black, -1, -1),
+                MakeModeLabel(Brushes.Black,  1, -1),
+                MakeModeLabel(Brushes.Black, -1,  1),
+                MakeModeLabel(Brushes.Black,  1,  1),
             };
+            var labelGrid = new Grid();
+            foreach (var t in _modeOutline) labelGrid.Children.Add(t);
+            labelGrid.Children.Add(_modeText);
 
             // Styled like a keyboard key (themed grey, set by ApplyTheme).
             _modeButton = new Button
             {
-                Content = _modeText,
+                Content = labelGrid,
                 Width = ModeBtnW,
                 Height = ModeBtnH,
                 Focusable = false,
@@ -500,15 +504,27 @@ namespace DesktopKeyboard
             UpdateModeButton();
         }
 
+        private static TextBlock MakeModeLabel(Brush fg, double dx, double dy) => new()
+        {
+            Text = "Auto",
+            FontSize = 15,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = fg,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            RenderTransform = new TranslateTransform(dx, dy),
+        };
+
         private void UpdateModeButton()
         {
-            if (_modeText != null)
-                _modeText.Text = currentMode switch
-                {
-                    KeyboardMode.Show => "Show",
-                    KeyboardMode.Hide => "Hide",
-                    _                 => "Auto",
-                };
+            string text = currentMode switch
+            {
+                KeyboardMode.Show => "Show",
+                KeyboardMode.Hide => "Hide",
+                _                 => "Auto",
+            };
+            if (_modeText != null) _modeText.Text = text;
+            foreach (var t in _modeOutline) t.Text = text;
         }
 
         private void ThemeButton_Click(object sender, RoutedEventArgs e)
@@ -798,7 +814,7 @@ namespace DesktopKeyboard
 
         // --- Modifier state machine ------------------------------------------
 
-        private void SetModState(string tag, ModState state)
+        private void SetModState(string tag, ModState state, bool updateLabels = true)
         {
             if (!_mod.ContainsKey(tag)) return;
             _mod[tag] = state;
@@ -816,7 +832,7 @@ namespace DesktopKeyboard
                 }
 
             // Shift and Fn both change key labels.
-            if (tag == "TOGGLE_SHIFT" || tag == "TOGGLE_FN") UpdateKeys();
+            if (updateLabels && (tag == "TOGGLE_SHIFT" || tag == "TOGGLE_FN")) UpdateKeys();
         }
 
         private void ConsumeOneShotModifiers()

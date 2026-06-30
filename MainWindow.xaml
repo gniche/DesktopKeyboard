@@ -58,7 +58,7 @@
                                     <BeginStoryboard>
                                         <Storyboard>
                                             <DoubleAnimation Storyboard.TargetName="PressHighlight" Storyboard.TargetProperty="Opacity"
-                                                             To="0" Duration="0:0:0.2"/>
+                                                             To="0" Duration="0:0:0.12"/>
                                         </Storyboard>
                                     </BeginStoryboard>
                                 </Trigger.ExitActions>
