@@ -22,7 +22,7 @@
 
 ## Requirements
 - Windows 10 or Windows 11 (x64 architecture).
-- [.NET 9.0 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) (x64). The installer stays compact by linking against the shared runtime rather than bundling it.
+- [.NET 9.0 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) (x64) — linked against rather than bundled. The UI uses [Avalonia](https://avaloniaui.net/) (Skia) for GPU-composited transparency; the Avalonia/Skia native libraries are included in the installer.
 
 ## Building from Source
 
@@ -58,7 +58,7 @@ Then build everything with the included script:
 
 The installer is output to `DesktopKeyboard.Installer\bin\DesktopKeyboard_Setup.msi`.
 
-The main app project (`DesktopKeyboard.csproj`) can still be opened and built directly in Visual Studio — only the installer is CLI/WiX-only.
+The app is an Avalonia project with the UI built in code (no XAML), so it builds with `dotnet` in any editor; only the installer is CLI/WiX-only.
 
 ## License
 This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
