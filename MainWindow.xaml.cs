@@ -57,16 +57,20 @@ namespace DesktopKeyboard
         // Modifier behaviour: a tap arms the modifier for the next key only (OneShot),
         // then it clears automatically; a long-press locks it on until tapped again.
         private enum ModState { Off, OneShot, Locked }
-        private ModState shiftState = ModState.Off;
-        private ModState ctrlState  = ModState.Off;
-        private ModState altState   = ModState.Off;
-        private ModState winState   = ModState.Off;
-        private ModState fnState    = ModState.Off;   // local remap (number row -> F1-F12), not a real key
 
         private static readonly Color LockColor = Color.FromRgb(210, 140, 30); // amber = locked
 
         private static readonly string[] ModTags =
             { "TOGGLE_SHIFT", "TOGGLE_CTRL", "TOGGLE_ALT", "TOGGLE_WIN", "TOGGLE_FN" };
+
+        // Live state of each modifier (TOGGLE_FN is a local number-row -> F1-F12 remap,
+        // not a real key). Single source of truth for the modifier state machine.
+        private readonly Dictionary<string, ModState> _mod = new()
+        {
+            ["TOGGLE_SHIFT"] = ModState.Off, ["TOGGLE_CTRL"] = ModState.Off,
+            ["TOGGLE_ALT"]   = ModState.Off, ["TOGGLE_WIN"]  = ModState.Off,
+            ["TOGGLE_FN"]    = ModState.Off,
+        };
 
         private readonly DispatcherTimer _longPressTimer =
             new() { Interval = TimeSpan.FromMilliseconds(300) };
@@ -716,7 +720,7 @@ namespace DesktopKeyboard
                     _hideTimer.Stop();
                 }
 
-                if (tag is "TOGGLE_SHIFT" or "TOGGLE_CTRL" or "TOGGLE_ALT" or "TOGGLE_WIN" or "TOGGLE_FN")
+                if (_mod.ContainsKey(tag))
                 {
                     // A long-press already locked this modifier; swallow the matching click.
                     if (_longPressFired && tag == _longPressTag)
@@ -725,21 +729,21 @@ namespace DesktopKeyboard
                         return;
                     }
                     // Tap: Off -> OneShot, OneShot/Locked -> Off.
-                    SetModState(tag, GetModState(tag) == ModState.Off ? ModState.OneShot : ModState.Off);
+                    SetModState(tag, _mod[tag] == ModState.Off ? ModState.OneShot : ModState.Off);
                     return;
                 }
 
                 byte vk = GetVirtualKeyCode(tag);
 
                 // Fn remaps the number row to F1-F12 (and Backspace to Delete) while active.
-                if (fnState != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
+                if (_mod["TOGGLE_FN"] != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
 
                 if (vk != 0)
                 {
-                    bool ctrl = ctrlState != ModState.Off;
-                    bool alt   = altState  != ModState.Off;
-                    bool shift = shiftState != ModState.Off;
-                    bool win   = winState  != ModState.Off;
+                    bool ctrl  = _mod["TOGGLE_CTRL"]  != ModState.Off;
+                    bool alt   = _mod["TOGGLE_ALT"]   != ModState.Off;
+                    bool shift = _mod["TOGGLE_SHIFT"] != ModState.Off;
+                    bool win   = _mod["TOGGLE_WIN"]   != ModState.Off;
 
                     if (ctrl)  keybd_event(VK_LCONTROL, 0, 0, 0);
                     if (alt)   keybd_event(VK_LMENU, 0, 0, 0);
@@ -761,26 +765,10 @@ namespace DesktopKeyboard
 
         // --- Modifier state machine ------------------------------------------
 
-        private ModState GetModState(string tag) => tag switch
-        {
-            "TOGGLE_SHIFT" => shiftState,
-            "TOGGLE_CTRL"  => ctrlState,
-            "TOGGLE_ALT"   => altState,
-            "TOGGLE_WIN"   => winState,
-            "TOGGLE_FN"    => fnState,
-            _              => ModState.Off,
-        };
-
         private void SetModState(string tag, ModState state)
         {
-            switch (tag)
-            {
-                case "TOGGLE_SHIFT": shiftState = state; break;
-                case "TOGGLE_CTRL":  ctrlState  = state; break;
-                case "TOGGLE_ALT":   altState   = state; break;
-                case "TOGGLE_WIN":   winState   = state; break;
-                case "TOGGLE_FN":    fnState    = state; break;
-            }
+            if (!_mod.ContainsKey(tag)) return;
+            _mod[tag] = state;
 
             // Off -> themed key brush; OneShot -> accent; Locked -> amber.
             ApplyToTag(this, tag, btn =>
@@ -799,23 +787,40 @@ namespace DesktopKeyboard
 
         private void ConsumeOneShotModifiers()
         {
-            if (shiftState == ModState.OneShot) SetModState("TOGGLE_SHIFT", ModState.Off);
-            if (ctrlState  == ModState.OneShot) SetModState("TOGGLE_CTRL",  ModState.Off);
-            if (altState   == ModState.OneShot) SetModState("TOGGLE_ALT",   ModState.Off);
-            if (winState   == ModState.OneShot) SetModState("TOGGLE_WIN",   ModState.Off);
-            if (fnState    == ModState.OneShot) SetModState("TOGGLE_FN",    ModState.Off);
+            foreach (var t in ModTags)
+                if (_mod[t] == ModState.OneShot) SetModState(t, ModState.Off);
         }
 
-        // Printable punctuation keys: tag -> (virtual-key, normal label, shifted label).
-        private static readonly Dictionary<string, (byte Vk, string Normal, string Shifted)> Punct = new()
+        // Printable punctuation keys: tag -> (normal label, shifted label). The virtual-key
+        // codes live in the unified Vk table below.
+        private static readonly Dictionary<string, (string Normal, string Shifted)> Punct = new()
         {
-            ["COMMA"]     = (0xBC, ",",  "<"),
-            ["PERIOD"]    = (0xBE, ".",  ">"),
-            ["SLASH"]     = (0xBF, "/",  "?"),
-            ["GRAVE"]     = (0xC0, "`",  "~"),
-            ["MINUS"]     = (0xBD, "-",  "_"),
-            ["EQUALS"]    = (0xBB, "=",  "+"),
-            ["BACKSLASH"] = (0xDC, "\\", "|"),
+            ["COMMA"]     = (",",  "<"),
+            ["PERIOD"]    = (".",  ">"),
+            ["SLASH"]     = ("/",  "?"),
+            ["GRAVE"]     = ("`",  "~"),
+            ["MINUS"]     = ("-",  "_"),
+            ["EQUALS"]    = ("=",  "+"),
+            ["BACKSLASH"] = ("\\", "|"),
+        };
+
+        // Single source of truth for virtual-key codes of every non-letter/non-digit key
+        // (letters and digits map to their ASCII value directly, see GetVirtualKeyCode).
+        private static readonly Dictionary<string, byte> Vk = new()
+        {
+            ["COMMA"] = 0xBC, ["PERIOD"] = 0xBE, ["SLASH"] = 0xBF, ["GRAVE"] = 0xC0,
+            ["MINUS"] = 0xBD, ["EQUALS"] = 0xBB, ["BACKSLASH"] = 0xDC,
+
+            ["BACK"] = 0x08, ["TAB"] = 0x09, ["ENTER"] = 0x0D, ["ESC"] = 0x1B, ["SPACE"] = 0x20,
+
+            ["LEFT"] = 0x25, ["UP"] = 0x26, ["RIGHT"] = 0x27, ["DOWN"] = 0x28,
+            ["PGUP"] = 0x21, ["PGDN"] = 0x22, ["END"] = 0x23, ["HOME"] = 0x24,
+
+            ["NUMLK"] = 0x90, ["NUMSLASH"] = 0x6F, ["NUMSTAR"] = 0x6A,
+            ["NUMMINUS"] = 0x6D, ["NUMPLUS"] = 0x6B,
+            ["NUM0"] = 0x60, ["NUM1"] = 0x61, ["NUM2"] = 0x62, ["NUM3"] = 0x63, ["NUM4"] = 0x64,
+            ["NUM5"] = 0x65, ["NUM6"] = 0x66, ["NUM7"] = 0x67, ["NUM8"] = 0x68, ["NUM9"] = 0x69,
+            ["NUMDOT"] = 0x6E,
         };
 
         // While Fn is active: number row -> F1-F12, and Backspace -> Delete.
@@ -887,8 +892,8 @@ namespace DesktopKeyboard
 
         private void UpdateKeys(DependencyObject parent)
         {
-            bool isShifted = shiftState != ModState.Off;
-            bool isFn      = fnState   != ModState.Off;
+            bool isShifted = _mod["TOGGLE_SHIFT"] != ModState.Off;
+            bool isFn      = _mod["TOGGLE_FN"]    != ModState.Off;
 
             foreach (object child in LogicalTreeHelper.GetChildren(parent))
             {
@@ -933,7 +938,7 @@ namespace DesktopKeyboard
             };
         }
 
-        private byte GetVirtualKeyCode(string keyTag)
+        private static byte GetVirtualKeyCode(string keyTag)
         {
             if (keyTag.Length == 1)
             {
@@ -942,60 +947,7 @@ namespace DesktopKeyboard
                     return (byte)c;
             }
 
-            if (Punct.TryGetValue(keyTag, out var p)) return p.Vk;
-
-            return keyTag switch
-            {
-                "BACK" => 0x08,
-                "TAB" => 0x09,
-                "ENTER" => 0x0D,
-                "ESC" => 0x1B,
-                "SPACE" => 0x20,
-
-                "LEFT" => 0x25,
-                "UP" => 0x26,
-                "RIGHT" => 0x27,
-                "DOWN" => 0x28,
-
-                "PGUP" => 0x21,
-                "PGDN" => 0x22,
-                "END" => 0x23,
-                "HOME" => 0x24,
-                "INS" => 0x2D,
-                "DEL" => 0x2E,
-
-                "F1" => 0x70,
-                "F2" => 0x71,
-                "F3" => 0x72,
-                "F4" => 0x73,
-                "F5" => 0x74,
-                "F6" => 0x75,
-                "F7" => 0x76,
-                "F8" => 0x77,
-                "F9" => 0x78,
-                "F10" => 0x79,
-                "F11" => 0x7A,
-                "F12" => 0x7B,
-
-                "NUMLK" => 0x90,
-                "NUMSLASH" => 0x6F,
-                "NUMSTAR" => 0x6A,
-                "NUMMINUS" => 0x6D,
-                "NUMPLUS" => 0x6B,
-                "NUM0" => 0x60,
-                "NUM1" => 0x61,
-                "NUM2" => 0x62,
-                "NUM3" => 0x63,
-                "NUM4" => 0x64,
-                "NUM5" => 0x65,
-                "NUM6" => 0x66,
-                "NUM7" => 0x67,
-                "NUM8" => 0x68,
-                "NUM9" => 0x69,
-                "NUMDOT" => 0x6E,
-
-                _ => 0
-            };
+            return Vk.TryGetValue(keyTag, out byte v) ? v : (byte)0;
         }
     }
 }
