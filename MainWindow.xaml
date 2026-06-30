@@ -156,6 +156,12 @@
                 <!-- F-key row, the Nav keys (PgUp/PgDn, Home/End) and numpad.  -->
                 <!-- ═══════════════════════════════════════════════════════ -->
                 <Grid Grid.Row="1" Margin="10,5,10,15">
+                    <!-- Every key in this subtree gets KeyStyle implicitly, so the keys below
+                         don't repeat Style="{StaticResource KeyStyle}". Top-bar/popup buttons
+                         live outside this Grid and keep their own explicit styles. -->
+                    <Grid.Resources>
+                        <Style TargetType="Button" BasedOn="{StaticResource KeyStyle}"/>
+                    </Grid.Resources>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="3*"/>
                         <ColumnDefinition x:Name="NumpadCol" Width="0"/>
@@ -172,20 +178,20 @@
 
                         <!-- Number row -->
                         <UniformGrid Grid.Row="0" Rows="1" Columns="14">
-                            <Button Style="{StaticResource KeyStyle}" Content="`" Tag="GRAVE" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="1" Tag="1" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="2" Tag="2" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="3" Tag="3" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="4" Tag="4" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="5" Tag="5" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="6" Tag="6" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="7" Tag="7" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="8" Tag="8" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="9" Tag="9" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="0" Tag="0" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="-" Tag="MINUS" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="=" Tag="EQUALS" Click="Key_Click"/>
-                            <Button Style="{StaticResource KeyStyle}" Content="⌫" Tag="BACK" Click="Key_Click" FontSize="18"/>
+                            <Button Content="`" Tag="GRAVE" Click="Key_Click"/>
+                            <Button Content="1" Tag="1" Click="Key_Click"/>
+                            <Button Content="2" Tag="2" Click="Key_Click"/>
+                            <Button Content="3" Tag="3" Click="Key_Click"/>
+                            <Button Content="4" Tag="4" Click="Key_Click"/>
+                            <Button Content="5" Tag="5" Click="Key_Click"/>
+                            <Button Content="6" Tag="6" Click="Key_Click"/>
+                            <Button Content="7" Tag="7" Click="Key_Click"/>
+                            <Button Content="8" Tag="8" Click="Key_Click"/>
+                            <Button Content="9" Tag="9" Click="Key_Click"/>
+                            <Button Content="0" Tag="0" Click="Key_Click"/>
+                            <Button Content="-" Tag="MINUS" Click="Key_Click"/>
+                            <Button Content="=" Tag="EQUALS" Click="Key_Click"/>
+                            <Button Content="⌫" Tag="BACK" Click="Key_Click" FontSize="18"/>
                         </UniformGrid>
 
                         <!-- Top letter row (Tab + qwerty + \) -->
@@ -196,18 +202,18 @@
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="1.2*"/>
                             </Grid.ColumnDefinitions>
-                            <Button Grid.Column="0"  Style="{StaticResource KeyStyle}" Content="⇥" Tag="TAB" Click="Key_Click" FontSize="22"/>
-                            <Button Grid.Column="1"  Style="{StaticResource KeyStyle}" Content="q" Tag="Q" Click="Key_Click"/>
-                            <Button Grid.Column="2"  Style="{StaticResource KeyStyle}" Content="w" Tag="W" Click="Key_Click"/>
-                            <Button Grid.Column="3"  Style="{StaticResource KeyStyle}" Content="e" Tag="E" Click="Key_Click"/>
-                            <Button Grid.Column="4"  Style="{StaticResource KeyStyle}" Content="r" Tag="R" Click="Key_Click"/>
-                            <Button Grid.Column="5"  Style="{StaticResource KeyStyle}" Content="t" Tag="T" Click="Key_Click"/>
-                            <Button Grid.Column="6"  Style="{StaticResource KeyStyle}" Content="y" Tag="Y" Click="Key_Click"/>
-                            <Button Grid.Column="7"  Style="{StaticResource KeyStyle}" Content="u" Tag="U" Click="Key_Click"/>
-                            <Button Grid.Column="8"  Style="{StaticResource KeyStyle}" Content="i" Tag="I" Click="Key_Click"/>
-                            <Button Grid.Column="9"  Style="{StaticResource KeyStyle}" Content="o" Tag="O" Click="Key_Click"/>
-                            <Button Grid.Column="10" Style="{StaticResource KeyStyle}" Content="p" Tag="P" Click="Key_Click"/>
-                            <Button Grid.Column="11" Style="{StaticResource KeyStyle}" Content="\" Tag="BACKSLASH" Click="Key_Click"/>
+                            <Button Grid.Column="0"  Content="⇥" Tag="TAB" Click="Key_Click" FontSize="22"/>
+                            <Button Grid.Column="1"  Content="q" Tag="Q" Click="Key_Click"/>
+                            <Button Grid.Column="2"  Content="w" Tag="W" Click="Key_Click"/>
+                            <Button Grid.Column="3"  Content="e" Tag="E" Click="Key_Click"/>
+                            <Button Grid.Column="4"  Content="r" Tag="R" Click="Key_Click"/>
+                            <Button Grid.Column="5"  Content="t" Tag="T" Click="Key_Click"/>
+                            <Button Grid.Column="6"  Content="y" Tag="Y" Click="Key_Click"/>
+                            <Button Grid.Column="7"  Content="u" Tag="U" Click="Key_Click"/>
+                            <Button Grid.Column="8"  Content="i" Tag="I" Click="Key_Click"/>
+                            <Button Grid.Column="9"  Content="o" Tag="O" Click="Key_Click"/>
+                            <Button Grid.Column="10" Content="p" Tag="P" Click="Key_Click"/>
+                            <Button Grid.Column="11" Content="\" Tag="BACKSLASH" Click="Key_Click"/>
                         </Grid>
 
                         <!-- Home row (Fn + asdf + Enter) -->
@@ -218,17 +224,17 @@
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="1.5*"/>
                             </Grid.ColumnDefinitions>
-                            <Button Grid.Column="0"  Style="{StaticResource KeyStyle}" Content="Fn" Tag="TOGGLE_FN" Click="Key_Click" FontSize="18"/>
-                            <Button Grid.Column="1"  Style="{StaticResource KeyStyle}" Content="a" Tag="A" Click="Key_Click"/>
-                            <Button Grid.Column="2"  Style="{StaticResource KeyStyle}" Content="s" Tag="S" Click="Key_Click"/>
-                            <Button Grid.Column="3"  Style="{StaticResource KeyStyle}" Content="d" Tag="D" Click="Key_Click"/>
-                            <Button Grid.Column="4"  Style="{StaticResource KeyStyle}" Content="f" Tag="F" Click="Key_Click"/>
-                            <Button Grid.Column="5"  Style="{StaticResource KeyStyle}" Content="g" Tag="G" Click="Key_Click"/>
-                            <Button Grid.Column="6"  Style="{StaticResource KeyStyle}" Content="h" Tag="H" Click="Key_Click"/>
-                            <Button Grid.Column="7"  Style="{StaticResource KeyStyle}" Content="j" Tag="J" Click="Key_Click"/>
-                            <Button Grid.Column="8"  Style="{StaticResource KeyStyle}" Content="k" Tag="K" Click="Key_Click"/>
-                            <Button Grid.Column="9"  Style="{StaticResource KeyStyle}" Content="l" Tag="L" Click="Key_Click"/>
-                            <Button Grid.Column="10" Style="{StaticResource KeyStyle}" Content="↵" Tag="ENTER" Click="Key_Click"/>
+                            <Button Grid.Column="0"  Content="Fn" Tag="TOGGLE_FN" Click="Key_Click" FontSize="18"/>
+                            <Button Grid.Column="1"  Content="a" Tag="A" Click="Key_Click"/>
+                            <Button Grid.Column="2"  Content="s" Tag="S" Click="Key_Click"/>
+                            <Button Grid.Column="3"  Content="d" Tag="D" Click="Key_Click"/>
+                            <Button Grid.Column="4"  Content="f" Tag="F" Click="Key_Click"/>
+                            <Button Grid.Column="5"  Content="g" Tag="G" Click="Key_Click"/>
+                            <Button Grid.Column="6"  Content="h" Tag="H" Click="Key_Click"/>
+                            <Button Grid.Column="7"  Content="j" Tag="J" Click="Key_Click"/>
+                            <Button Grid.Column="8"  Content="k" Tag="K" Click="Key_Click"/>
+                            <Button Grid.Column="9"  Content="l" Tag="L" Click="Key_Click"/>
+                            <Button Grid.Column="10" Content="↵" Tag="ENTER" Click="Key_Click"/>
                         </Grid>
 
                         <!-- Shift row (incl. PgUp/PgDn) -->
@@ -240,20 +246,20 @@
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <Button Grid.Column="0"  Style="{StaticResource KeyStyle}" Content="⇧" Tag="TOGGLE_SHIFT" Click="Key_Click" FontSize="26"/>
-                            <Button Grid.Column="1"  Style="{StaticResource KeyStyle}" Content="z" Tag="Z" Click="Key_Click"/>
-                            <Button Grid.Column="2"  Style="{StaticResource KeyStyle}" Content="x" Tag="X" Click="Key_Click"/>
-                            <Button Grid.Column="3"  Style="{StaticResource KeyStyle}" Content="c" Tag="C" Click="Key_Click"/>
-                            <Button Grid.Column="4"  Style="{StaticResource KeyStyle}" Content="v" Tag="V" Click="Key_Click"/>
-                            <Button Grid.Column="5"  Style="{StaticResource KeyStyle}" Content="b" Tag="B" Click="Key_Click"/>
-                            <Button Grid.Column="6"  Style="{StaticResource KeyStyle}" Content="n" Tag="N" Click="Key_Click"/>
-                            <Button Grid.Column="7"  Style="{StaticResource KeyStyle}" Content="m" Tag="M" Click="Key_Click"/>
-                            <Button Grid.Column="8"  Style="{StaticResource KeyStyle}" Content="," Tag="COMMA" Click="Key_Click"/>
-                            <Button Grid.Column="9"  Style="{StaticResource KeyStyle}" Content="." Tag="PERIOD" Click="Key_Click"/>
-                            <Button Grid.Column="10" Style="{StaticResource KeyStyle}" Content="/" Tag="SLASH" Click="Key_Click"/>
-                            <Button Grid.Column="11" Style="{StaticResource KeyStyle}" Content="↑" Tag="UP" Click="Key_Click" FontSize="26"/>
-                            <Button Grid.Column="12" Style="{StaticResource KeyStyle}" Content="PgUp" Tag="PGUP" Click="Key_Click" FontSize="15"/>
-                            <Button Grid.Column="13" Style="{StaticResource KeyStyle}" Content="PgDn" Tag="PGDN" Click="Key_Click" FontSize="15"/>
+                            <Button Grid.Column="0"  Content="⇧" Tag="TOGGLE_SHIFT" Click="Key_Click" FontSize="26"/>
+                            <Button Grid.Column="1"  Content="z" Tag="Z" Click="Key_Click"/>
+                            <Button Grid.Column="2"  Content="x" Tag="X" Click="Key_Click"/>
+                            <Button Grid.Column="3"  Content="c" Tag="C" Click="Key_Click"/>
+                            <Button Grid.Column="4"  Content="v" Tag="V" Click="Key_Click"/>
+                            <Button Grid.Column="5"  Content="b" Tag="B" Click="Key_Click"/>
+                            <Button Grid.Column="6"  Content="n" Tag="N" Click="Key_Click"/>
+                            <Button Grid.Column="7"  Content="m" Tag="M" Click="Key_Click"/>
+                            <Button Grid.Column="8"  Content="," Tag="COMMA" Click="Key_Click"/>
+                            <Button Grid.Column="9"  Content="." Tag="PERIOD" Click="Key_Click"/>
+                            <Button Grid.Column="10" Content="/" Tag="SLASH" Click="Key_Click"/>
+                            <Button Grid.Column="11" Content="↑" Tag="UP" Click="Key_Click" FontSize="26"/>
+                            <Button Grid.Column="12" Content="PgUp" Tag="PGUP" Click="Key_Click" FontSize="15"/>
+                            <Button Grid.Column="13" Content="PgDn" Tag="PGDN" Click="Key_Click" FontSize="15"/>
                         </Grid>
 
                         <!-- Bottom row (incl. Home/End) -->
@@ -264,15 +270,15 @@
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <Button Grid.Column="0" Style="{StaticResource KeyStyle}" Content="Ctrl" Tag="TOGGLE_CTRL" Click="Key_Click" FontSize="18"/>
-                            <Button Grid.Column="1" Style="{StaticResource KeyStyle}" Content="⊞" Tag="TOGGLE_WIN" Click="Key_Click" FontSize="20"/>
-                            <Button Grid.Column="2" Style="{StaticResource KeyStyle}" Content="Alt" Tag="TOGGLE_ALT" Click="Key_Click" FontSize="18"/>
-                            <Button Grid.Column="3" Style="{StaticResource KeyStyle}" Content="Space" Tag="SPACE" Click="Key_Click" FontSize="18"/>
-                            <Button Grid.Column="4" Style="{StaticResource KeyStyle}" Content="←" Tag="LEFT" Click="Key_Click" FontSize="22"/>
-                            <Button Grid.Column="5" Style="{StaticResource KeyStyle}" Content="↓" Tag="DOWN" Click="Key_Click" FontSize="22"/>
-                            <Button Grid.Column="6" Style="{StaticResource KeyStyle}" Content="→" Tag="RIGHT" Click="Key_Click" FontSize="22"/>
-                            <Button Grid.Column="7" Style="{StaticResource KeyStyle}" Content="Home" Tag="HOME" Click="Key_Click" FontSize="15"/>
-                            <Button Grid.Column="8" Style="{StaticResource KeyStyle}" Content="End" Tag="END" Click="Key_Click" FontSize="15"/>
+                            <Button Grid.Column="0" Content="Ctrl" Tag="TOGGLE_CTRL" Click="Key_Click" FontSize="18"/>
+                            <Button Grid.Column="1" Content="⊞" Tag="TOGGLE_WIN" Click="Key_Click" FontSize="20"/>
+                            <Button Grid.Column="2" Content="Alt" Tag="TOGGLE_ALT" Click="Key_Click" FontSize="18"/>
+                            <Button Grid.Column="3" Content="Space" Tag="SPACE" Click="Key_Click" FontSize="18"/>
+                            <Button Grid.Column="4" Content="←" Tag="LEFT" Click="Key_Click" FontSize="22"/>
+                            <Button Grid.Column="5" Content="↓" Tag="DOWN" Click="Key_Click" FontSize="22"/>
+                            <Button Grid.Column="6" Content="→" Tag="RIGHT" Click="Key_Click" FontSize="22"/>
+                            <Button Grid.Column="7" Content="Home" Tag="HOME" Click="Key_Click" FontSize="15"/>
+                            <Button Grid.Column="8" Content="End" Tag="END" Click="Key_Click" FontSize="15"/>
                         </Grid>
                     </Grid>
 
@@ -286,23 +292,23 @@
                             <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <Button Grid.Row="0" Grid.Column="0" Style="{StaticResource KeyStyle}" Content="NLk" Tag="NUMLK"   Click="Key_Click" FontSize="14"/>
-                        <Button Grid.Row="0" Grid.Column="1" Style="{StaticResource KeyStyle}" Content="/"   Tag="NUMSLASH" Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="0" Grid.Column="2" Style="{StaticResource KeyStyle}" Content="*"   Tag="NUMSTAR"  Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="0" Grid.Column="3" Style="{StaticResource KeyStyle}" Content="-"   Tag="NUMMINUS" Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="1" Grid.Column="0" Style="{StaticResource KeyStyle}" Content="7"   Tag="NUM7"     Click="Key_Click"/>
-                        <Button Grid.Row="1" Grid.Column="1" Style="{StaticResource KeyStyle}" Content="8"   Tag="NUM8"     Click="Key_Click"/>
-                        <Button Grid.Row="1" Grid.Column="2" Style="{StaticResource KeyStyle}" Content="9"   Tag="NUM9"     Click="Key_Click"/>
-                        <Button Grid.Row="1" Grid.Column="3" Grid.RowSpan="2" Style="{StaticResource KeyStyle}" Content="+" Tag="NUMPLUS" Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="2" Grid.Column="0" Style="{StaticResource KeyStyle}" Content="4"   Tag="NUM4"     Click="Key_Click"/>
-                        <Button Grid.Row="2" Grid.Column="1" Style="{StaticResource KeyStyle}" Content="5"   Tag="NUM5"     Click="Key_Click"/>
-                        <Button Grid.Row="2" Grid.Column="2" Style="{StaticResource KeyStyle}" Content="6"   Tag="NUM6"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="0" Style="{StaticResource KeyStyle}" Content="1"   Tag="NUM1"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="1" Style="{StaticResource KeyStyle}" Content="2"   Tag="NUM2"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="2" Style="{StaticResource KeyStyle}" Content="3"   Tag="NUM3"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="3" Grid.RowSpan="2" Style="{StaticResource KeyStyle}" Content="↵" Tag="ENTER" Click="Key_Click" FontSize="20"/>
-                        <Button Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Style="{StaticResource KeyStyle}" Content="0" Tag="NUM0" Click="Key_Click"/>
-                        <Button Grid.Row="4" Grid.Column="2" Style="{StaticResource KeyStyle}" Content="."   Tag="NUMDOT"   Click="Key_Click" FontSize="18"/>
+                        <Button Grid.Row="0" Grid.Column="0" Content="NLk" Tag="NUMLK"   Click="Key_Click" FontSize="14"/>
+                        <Button Grid.Row="0" Grid.Column="1" Content="/"   Tag="NUMSLASH" Click="Key_Click" FontSize="18"/>
+                        <Button Grid.Row="0" Grid.Column="2" Content="*"   Tag="NUMSTAR"  Click="Key_Click" FontSize="18"/>
+                        <Button Grid.Row="0" Grid.Column="3" Content="-"   Tag="NUMMINUS" Click="Key_Click" FontSize="18"/>
+                        <Button Grid.Row="1" Grid.Column="0" Content="7"   Tag="NUM7"     Click="Key_Click"/>
+                        <Button Grid.Row="1" Grid.Column="1" Content="8"   Tag="NUM8"     Click="Key_Click"/>
+                        <Button Grid.Row="1" Grid.Column="2" Content="9"   Tag="NUM9"     Click="Key_Click"/>
+                        <Button Grid.Row="1" Grid.Column="3" Grid.RowSpan="2" Content="+" Tag="NUMPLUS" Click="Key_Click" FontSize="18"/>
+                        <Button Grid.Row="2" Grid.Column="0" Content="4"   Tag="NUM4"     Click="Key_Click"/>
+                        <Button Grid.Row="2" Grid.Column="1" Content="5"   Tag="NUM5"     Click="Key_Click"/>
+                        <Button Grid.Row="2" Grid.Column="2" Content="6"   Tag="NUM6"     Click="Key_Click"/>
+                        <Button Grid.Row="3" Grid.Column="0" Content="1"   Tag="NUM1"     Click="Key_Click"/>
+                        <Button Grid.Row="3" Grid.Column="1" Content="2"   Tag="NUM2"     Click="Key_Click"/>
+                        <Button Grid.Row="3" Grid.Column="2" Content="3"   Tag="NUM3"     Click="Key_Click"/>
+                        <Button Grid.Row="3" Grid.Column="3" Grid.RowSpan="2" Content="↵" Tag="ENTER" Click="Key_Click" FontSize="20"/>
+                        <Button Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Content="0" Tag="NUM0" Click="Key_Click"/>
+                        <Button Grid.Row="4" Grid.Column="2" Content="."   Tag="NUMDOT"   Click="Key_Click" FontSize="18"/>
                     </Grid>
                 </Grid>
 
