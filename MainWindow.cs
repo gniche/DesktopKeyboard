@@ -74,6 +74,10 @@ public class MainWindow : Window
     private const double ModeBtnW = 96, ModeBtnH = 32;
     private bool _modeDragging;
     private POINT _modeDragStart, _modeDragLast;
+    private POINT _kbDragLast;
+    // Re-asserts the mode button above the keyboard shortly after a show settles (both are
+    // topmost, so their relative order isn't otherwise guaranteed).
+    private readonly DispatcherTimer _bringTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
 
     // --- Window / lifecycle --------------------------------------------------
     private readonly IClassicDesktopStyleApplicationLifetime _desktop;
@@ -129,6 +133,7 @@ public class MainWindow : Window
         _hideTimer.Tick += HideTimer_Tick;
         _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); SaveSettingsNow(); };
         _longPressTimer.Tick += LongPress_Tick;
+        _bringTimer.Tick += (_, _) => { _bringTimer.Stop(); RaiseModeAboveKeyboard(); };
 
         PositionChanged += (_, _) => { _kbPos = Position; RepositionModeWindow(); };
 
@@ -223,11 +228,24 @@ public class MainWindow : Window
         };
         bar.Children.Add(_themePopup);
 
-        // Drag the keyboard by the empty top-bar area.
+        // Drag the keyboard by the empty top-bar area. BeginMoveDrag uses the OS move-loop,
+        // which a WS_EX_NOACTIVATE window can't enter, so move it manually like the mode button.
         bar.PointerPressed += (_, e) =>
         {
-            if (ReferenceEquals(e.Source, bar)) { BeginMoveDrag(e); BringModeButtonToFront(); }
+            if (!ReferenceEquals(e.Source, bar)) return;   // ignore presses on Esc/chrome buttons
+            e.Pointer.Capture(bar);
+            GetCursorPos(out _kbDragLast);
         };
+        bar.PointerMoved += (_, e) =>
+        {
+            if (!ReferenceEquals(e.Pointer.Captured, bar)) return;
+            GetCursorPos(out POINT cur);
+            _kbPos = new PixelPoint(_kbPos.X + (cur.X - _kbDragLast.X), _kbPos.Y + (cur.Y - _kbDragLast.Y));
+            Position = _kbPos;
+            _kbDragLast = cur;
+            RepositionModeWindow();
+        };
+        bar.PointerReleased += (_, e) => { e.Pointer.Capture(null); BringModeButtonToFront(); };
 
         return bar;
     }
@@ -685,17 +703,21 @@ public class MainWindow : Window
 
     private void BringModeButtonToFront()
     {
+        // Do it now, then again after the show/topmost calls settle (the OS may finish
+        // raising the keyboard asynchronously after this returns).
+        RaiseModeAboveKeyboard();
+        _bringTimer.Stop();
+        _bringTimer.Start();
+    }
+
+    private void RaiseModeAboveKeyboard()
+    {
         if (_modeWindow == null) return;
         var modeH = _modeWindow.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
-        var kbH = _hwnd;
         if (modeH == IntPtr.Zero) return;
-
-        Dispatcher.UIThread.Post(() =>
-        {
-            MakeTopmost(modeH);
-            if (kbH != IntPtr.Zero)
-                SetWindowPos(kbH, modeH, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }, DispatcherPriority.Loaded);
+        MakeTopmost(modeH);
+        if (_hwnd != IntPtr.Zero)
+            SetWindowPos(_hwnd, modeH, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     private void CycleMode()
