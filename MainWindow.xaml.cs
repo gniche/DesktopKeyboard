@@ -135,6 +135,14 @@ namespace DesktopKeyboard
         private readonly DispatcherTimer _saveTimer =
             new() { Interval = TimeSpan.FromMilliseconds(400) };
 
+        // Opt-in perf sampler (set env DESKTOPKEYBOARD_DIAG=1). Logs whole-process CPU%,
+        // working set and managed heap. Whole-process CPU includes the render thread, so it
+        // captures the layered-window blit cost. Off and zero-overhead unless enabled.
+        private DispatcherTimer? _perfTimer;
+        private TimeSpan _perfLastCpu;
+        private long _perfLastTick;
+        private string? _perfLogPath;
+
         // Every tagged button, indexed by Tag, built once after InitializeComponent. Lets the
         // modifier/label updates touch keys directly instead of re-walking the logical tree on
         // each keystroke. Tags are unique except ENTER (main + numpad), hence a list per tag.
@@ -161,6 +169,7 @@ namespace DesktopKeyboard
             {
                 CreateModeButton();
                 LoadSettings();
+                StartPerfLog();   // no-op unless DESKTOPKEYBOARD_DIAG=1
             });
 
             // Defer UIA registration until after the window is shown — initializing
@@ -717,6 +726,49 @@ namespace DesktopKeyboard
                 key.SetValue("RunOnStartup", runOnStartup ? 1 : 0, RegistryValueKind.DWord);
             }
             catch (Exception ex) { Debug.WriteLine($"SaveSettings failed: {ex.Message}"); }
+        }
+
+        // --- Opt-in performance logging --------------------------------------
+
+        private void StartPerfLog()
+        {
+            if (Environment.GetEnvironmentVariable("DESKTOPKEYBOARD_DIAG") != "1") return;
+
+            _perfLogPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "DesktopKeyboard_perf.log");
+            using (var proc = Process.GetCurrentProcess())
+            {
+                _perfLastCpu = proc.TotalProcessorTime;
+            }
+            _perfLastTick = Environment.TickCount64;
+            PerfWrite($"--- session start, cores={Environment.ProcessorCount} ---");
+
+            _perfTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _perfTimer.Tick += PerfLog_Tick;
+            _perfTimer.Start();
+        }
+
+        private void PerfLog_Tick(object? sender, EventArgs e)
+        {
+            using var proc = Process.GetCurrentProcess();
+            long now = Environment.TickCount64;
+            double wallMs = now - _perfLastTick;
+            TimeSpan cpu = proc.TotalProcessorTime;
+            double cpuMs = (cpu - _perfLastCpu).TotalMilliseconds;
+            _perfLastCpu = cpu;
+            _perfLastTick = now;
+
+            // Normalise CPU time over the sampling window and all cores -> whole-machine %.
+            double cpuPct = wallMs > 0 ? cpuMs / (wallMs * Environment.ProcessorCount) * 100.0 : 0;
+            double wsMb = proc.WorkingSet64 / (1024.0 * 1024.0);
+            double gcMb = GC.GetTotalMemory(false) / (1024.0 * 1024.0);
+
+            PerfWrite($"cpu={cpuPct,5:F1}%  ws={wsMb,6:F1}MB  gcHeap={gcMb,5:F1}MB  visible={(Visibility == Visibility.Visible ? 1 : 0)}");
+        }
+
+        private void PerfWrite(string body)
+        {
+            try { System.IO.File.AppendAllText(_perfLogPath!, $"{DateTime.Now:HH:mm:ss}  {body}{Environment.NewLine}"); }
+            catch { }
         }
 
         private void LoadSettings()
