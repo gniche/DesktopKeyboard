@@ -73,8 +73,9 @@ public class MainWindow : Window
     private TextBlock[] _modeOutline = Array.Empty<TextBlock>();
     private const double ModeBtnW = 96, ModeBtnH = 32;
     private bool _modeDragging;
-    private POINT _modeDragStart, _modeDragLast;
-    private POINT _kbDragLast;
+    private int _modeDownX, _modeDownY;   // screen pos where a mode-button press started (tap vs drag)
+    private int _modeGrabX, _modeGrabY;   // finger-to-keyboard offset captured for the drag
+    private int _grabX, _grabY;           // pointer-to-window offset captured when a top-bar drag starts
     // Re-asserts the mode button above the keyboard shortly after a show settles (both are
     // topmost, so their relative order isn't otherwise guaranteed).
     private readonly DispatcherTimer _bringTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
@@ -229,20 +230,24 @@ public class MainWindow : Window
         bar.Children.Add(_themePopup);
 
         // Drag the keyboard by the empty top-bar area. BeginMoveDrag uses the OS move-loop,
-        // which a WS_EX_NOACTIVATE window can't enter, so move it manually like the mode button.
+        // which a WS_EX_NOACTIVATE window can't enter, so move it manually. Use an absolute
+        // grab-offset (not incremental deltas) from Avalonia's own pointer coordinates: touch
+        // withholds moves until a drag threshold, and the OS cursor doesn't track touch — so
+        // anchoring to the grabbed window point keeps it glued under the finger regardless.
         bar.PointerPressed += (_, e) =>
         {
             if (!ReferenceEquals(e.Source, bar)) return;   // ignore presses on Esc/chrome buttons
             e.Pointer.Capture(bar);
-            GetCursorPos(out _kbDragLast);
+            var grab = this.PointToScreen(e.GetPosition(this));
+            _grabX = grab.X - Position.X;
+            _grabY = grab.Y - Position.Y;
         };
         bar.PointerMoved += (_, e) =>
         {
             if (!ReferenceEquals(e.Pointer.Captured, bar)) return;
-            GetCursorPos(out POINT cur);
-            _kbPos = new PixelPoint(_kbPos.X + (cur.X - _kbDragLast.X), _kbPos.Y + (cur.Y - _kbDragLast.Y));
+            var p = this.PointToScreen(e.GetPosition(this));
+            _kbPos = new PixelPoint(p.X - _grabX, p.Y - _grabY);
             Position = _kbPos;
-            _kbDragLast = cur;
             RepositionModeWindow();
         };
         bar.PointerReleased += (_, e) => { e.Pointer.Capture(null); BringModeButtonToFront(); };
@@ -637,26 +642,27 @@ public class MainWindow : Window
         _modeBg.PointerPressed += (_, e) =>
         {
             e.Pointer.Capture(_modeBg);
-            GetCursorPos(out _modeDragStart);
-            _modeDragLast = _modeDragStart;
+            var f = _modeBg!.PointToScreen(e.GetPosition(_modeBg));
+            _modeDownX = f.X; _modeDownY = f.Y;
+            _modeGrabX = f.X - _kbPos.X; _modeGrabY = f.Y - _kbPos.Y;
             _modeDragging = false;
         };
         _modeBg.PointerMoved += (_, e) =>
         {
-            if (!e.GetCurrentPoint(_modeBg).Properties.IsLeftButtonPressed) return;
-            GetCursorPos(out POINT cur);
-            if (!_modeDragging && (Math.Abs(cur.X - _modeDragStart.X) > 4 || Math.Abs(cur.Y - _modeDragStart.Y) > 4))
+            if (!ReferenceEquals(e.Pointer.Captured, _modeBg)) return;
+            var f = _modeBg!.PointToScreen(e.GetPosition(_modeBg));
+            if (!_modeDragging && (Math.Abs(f.X - _modeDownX) > 6 || Math.Abs(f.Y - _modeDownY) > 6))
                 _modeDragging = true;
             if (_modeDragging)
             {
-                _kbPos = new PixelPoint(_kbPos.X + (cur.X - _modeDragLast.X), _kbPos.Y + (cur.Y - _modeDragLast.Y));
+                _kbPos = new PixelPoint(f.X - _modeGrabX, f.Y - _modeGrabY);
                 if (_shown) Position = _kbPos;
-                _modeDragLast = cur;
                 RepositionModeWindow();
             }
         };
-        _modeBg.PointerReleased += (_, _) =>
+        _modeBg.PointerReleased += (_, e) =>
         {
+            e.Pointer.Capture(null);
             if (_modeDragging) { _modeDragging = false; return; }
             CycleMode();
         };
