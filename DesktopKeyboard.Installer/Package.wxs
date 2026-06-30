@@ -15,6 +15,9 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of DesktopKeyboard is already installed."
                   AllowSameVersionUpgrades="yes" />
 
+    <!-- Embed the cab so the installer ships as a single self-contained .msi file. -->
+    <MediaTemplate EmbedCab="yes" />
+
     <!--
       Closes the running app (via WM_CLOSE, falling back to Restart Manager) before files
       are replaced, so install/upgrade/uninstall never hits the "files in use" blocker.
@@ -106,29 +109,13 @@
   </Package>
 
   <Fragment>
+    <!--
+      Harvest the entire self-contained / ReadyToRun publish output: the app exe,
+      the precompiled .NET runtime assemblies, keyboard.ico, and the bundled cert.
+      This replaces the previous hand-listed framework-dependent file set.
+    -->
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
-      <Component Id="ExeFile" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
-        <File Id="MainExe"
-              Source="..\bin\Release\net9.0-windows\DesktopKeyboard.exe"
-              KeyPath="yes" />
-      </Component>
-      <Component Id="DllFile" Guid="D4E5F6A7-B8C9-0123-DEF0-234567890123">
-        <File Source="..\bin\Release\net9.0-windows\DesktopKeyboard.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="RuntimeConfig" Guid="E5F6A7B8-C9D0-1234-EF01-345678901234">
-        <File Source="..\bin\Release\net9.0-windows\DesktopKeyboard.runtimeconfig.json" KeyPath="yes" />
-      </Component>
-      <Component Id="DepsJson" Guid="F6A7B8C9-D0E1-2345-F012-456789012345">
-        <File Source="..\bin\Release\net9.0-windows\DesktopKeyboard.deps.json" KeyPath="yes" />
-      </Component>
-      <Component Id="IconFile" Guid="A7B8C9D0-E1F2-3456-0123-567890123456">
-        <File Source="..\keyboard.ico" KeyPath="yes" />
-      </Component>
-      <Component Id="CertFile" Guid="B8C9D0E1-F2A3-4567-1234-678901234567">
-        <File Id="CertFileId"
-              Source="DesktopKeyboard.cer"
-              KeyPath="yes" />
-      </Component>
+      <Files Include="..\publish\**" />
     </ComponentGroup>
   </Fragment>
 

@@ -60,7 +60,8 @@ namespace DesktopKeyboard
         private TextBlock? _modeText;
 
         private bool runOnStartup = false;
-        private bool _loading = false;        // suppresses SaveSettings while applying loaded values
+        private bool _loading = false;          // suppresses SaveSettings while applying loaded values
+        private bool _settingsLoaded = false;   // blocks SaveSettings until the initial load finishes
         private bool _suppressHideOnce = false; // keeps keyboard up after Esc moves focus
 
         private const string SettingsKey = @"Software\serifpersia\DesktopKeyboard";
@@ -548,7 +549,10 @@ namespace DesktopKeyboard
 
         private void SaveSettings()
         {
-            if (_loading) return;
+            // Skip while applying loaded values, and skip the spurious ValueChanged events
+            // raised during InitializeComponent (before settings have been loaded) so they
+            // can't clobber the saved registry values with defaults.
+            if (_loading || !_settingsLoaded) return;
             try
             {
                 var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -605,7 +609,11 @@ namespace DesktopKeyboard
                 UpdateStartupButton();
             }
             catch (Exception ex) { Debug.WriteLine($"LoadSettings failed: {ex.Message}"); }
-            finally { _loading = false; }
+            finally
+            {
+                _loading = false;
+                _settingsLoaded = true; // saves are now allowed
+            }
         }
 
         private static double ReadDouble(RegistryKey? key, string name, double fallback)

@@ -14,10 +14,20 @@ if ($env:PATH -notlike "*$dotnetToolsPath*") {
     $env:PATH = "$dotnetToolsPath;$env:PATH"
 }
 
-# --- Build app ---------------------------------------------------------------
+# --- Publish app (self-contained, ReadyToRun) --------------------------------
+# Self-contained + ReadyToRun ships fully precompiled native images and the .NET
+# runtime, so the installed app starts fast and needs no separate runtime install.
 
-Write-Host "Building DesktopKeyboard ($Configuration)..." -ForegroundColor Cyan
-dotnet build "$root\DesktopKeyboard.csproj" -c $Configuration
+$publishDir = "$root\publish"
+$rid        = "win-x64"
+
+Write-Host "Publishing DesktopKeyboard ($Configuration, $rid, ReadyToRun)..." -ForegroundColor Cyan
+Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
+dotnet publish "$root\DesktopKeyboard.csproj" `
+    -c $Configuration `
+    -r $rid `
+    --self-contained true `
+    -o $publishDir
 if (-not $?) { exit 1 }
 
 # --- Cert (create if missing, export for installer) --------------------------
@@ -41,8 +51,9 @@ if (-not $SkipSign) {
         Write-Host "Created cert: $($cert.Thumbprint)" -ForegroundColor Green
     }
 
-    # Export public cert (.cer) for the installer to bundle and trust system-wide.
-    $cerPath = "$root\DesktopKeyboard.Installer\DesktopKeyboard.cer"
+    # Export public cert (.cer) into the publish folder so it's packaged with the app
+    # and the installer can trust it system-wide (required for uiAccess + SmartScreen).
+    $cerPath = "$publishDir\DesktopKeyboard.cer"
     $certBytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
     [System.IO.File]::WriteAllBytes($cerPath, $certBytes)
     Write-Host "Exported cert to $cerPath" -ForegroundColor Green
@@ -54,7 +65,7 @@ if (-not $SkipSign) {
 # otherwise the MSI ships an unsigned exe and Windows rejects the launch with
 # "A referral was returned from the server".
 
-$exePath = "$root\bin\$Configuration\net9.0-windows\DesktopKeyboard.exe"
+$exePath = "$publishDir\DesktopKeyboard.exe"
 
 function Sign-Artifact($path) {
     Write-Host "Signing $path ..." -ForegroundColor Cyan
@@ -99,5 +110,5 @@ if ($SkipSign) {
 
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
-Write-Host "  Exe:       $root\bin\$Configuration\net9.0-windows\DesktopKeyboard.exe"
+Write-Host "  Exe:       $publishDir\DesktopKeyboard.exe"
 Write-Host "  Installer: $outDir\DesktopKeyboard_Setup.msi"
