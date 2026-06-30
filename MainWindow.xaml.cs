@@ -730,9 +730,23 @@ namespace DesktopKeyboard
 
         // --- Opt-in performance logging --------------------------------------
 
+        // Enabled by either env DESKTOPKEYBOARD_DIAG=1 or registry DWORD "Diag"=1 under the
+        // settings key. The registry flag is the reliable trigger: a uiAccess process may be
+        // launched with a fresh environment block and not see the env var.
+        private static bool DiagEnabled()
+        {
+            if (Environment.GetEnvironmentVariable("DESKTOPKEYBOARD_DIAG") == "1") return true;
+            try
+            {
+                using var k = Registry.CurrentUser.OpenSubKey(SettingsKey);
+                return k?.GetValue("Diag") is int d && d == 1;
+            }
+            catch { return false; }
+        }
+
         private void StartPerfLog()
         {
-            if (Environment.GetEnvironmentVariable("DESKTOPKEYBOARD_DIAG") != "1") return;
+            if (!DiagEnabled()) return;
 
             _perfLogPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "DesktopKeyboard_perf.log");
             using (var proc = Process.GetCurrentProcess())
