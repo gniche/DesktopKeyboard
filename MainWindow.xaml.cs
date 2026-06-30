@@ -157,10 +157,7 @@ namespace DesktopKeyboard
 
             // Defer UIA registration until after the window is shown — initializing
             // the UIA COM infrastructure on the UI thread blocks startup for several seconds.
-            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
-            {
-                Automation.AddAutomationFocusChangedEventHandler(OnFocusChanged);
-            });
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, RegisterFocusTracking);
         }
 
         protected override void OnSourceInitialized(EventArgs e)
@@ -194,47 +191,68 @@ namespace DesktopKeyboard
             }
         }
 
+        // Subscribe to system-wide focus changes under a CacheRequest so each event delivers
+        // the focused element with its ControlType, Name and the Value/Text patterns already
+        // cached. Reading those is then local (no per-focus cross-process round-trips), and
+        // AutomationElementMode.None keeps the elements lightweight since we never need a live
+        // reference — we only read the cached data.
+        private void RegisterFocusTracking()
+        {
+            var cache = new CacheRequest { AutomationElementMode = AutomationElementMode.None };
+            cache.Add(AutomationElement.ControlTypeProperty);
+            cache.Add(AutomationElement.NameProperty);
+            cache.Add(ValuePattern.Pattern);
+            cache.Add(ValuePattern.IsReadOnlyProperty);
+            cache.Add(TextPattern.Pattern);
+
+            using (cache.Activate())
+                Automation.AddAutomationFocusChangedEventHandler(OnFocusChanged);
+        }
+
         private void OnFocusChanged(object? sender, AutomationFocusChangedEventArgs e)
         {
             // In Show/Hide modes the floating button controls visibility, not input focus.
             if (currentMode != KeyboardMode.Auto) return;
+            if (sender is not AutomationElement fe) return;
 
-            AutomationElement? fe = AutomationElement.FocusedElement;
-            if (fe == null) return;
+            // Classify on the UIA callback thread using cached data (no cross-process calls
+            // and nothing heavy on the UI thread), then marshal only the result across.
+            bool editable;
+            try { editable = IsEditableTextField(fe); }
+            catch { return; }
 
-            // BeginInvoke (not Invoke) so the UI Automation callback thread isn't blocked
-            // waiting on the UI thread for every system-wide focus change.
-            Dispatcher.BeginInvoke(() =>
-            {
-                if (IsEditableTextField(fe))
-                {
-                    _hideTimer.Stop();
-
-                    // Only re-assert z-order on an actual hidden -> visible transition;
-                    // tabbing between fields while already visible needs no extra work.
-                    if (this.Visibility != Visibility.Visible)
-                    {
-                        this.Visibility = Visibility.Visible;
-                        MakeTopmost(new WindowInteropHelper(this).Handle);
-                        BringModeButtonToFront();
-                    }
-                }
-                else if (this.Visibility == Visibility.Visible)
-                {
-                    // Esc often moves focus off the text field; keep the keyboard up for a
-                    // short window so combos like Ctrl+Alt+Esc don't dismiss it.
-                    if (DateTime.Now < _suppressHideUntil)
-                        return;
-                    _hideTimer.Start();
-                }
-            });
+            Dispatcher.BeginInvoke(() => ApplyFocusVisibility(editable));
         }
 
-        private bool IsEditableTextField(AutomationElement element)
+        private void ApplyFocusVisibility(bool editable)
         {
-            if (element == null) return false;
+            if (editable)
+            {
+                _hideTimer.Stop();
 
-            var ct = element.Current.ControlType;
+                // Only re-assert z-order on an actual hidden -> visible transition;
+                // tabbing between fields while already visible needs no extra work.
+                if (this.Visibility != Visibility.Visible)
+                {
+                    this.Visibility = Visibility.Visible;
+                    MakeTopmost(new WindowInteropHelper(this).Handle);
+                    BringModeButtonToFront();
+                }
+            }
+            else if (this.Visibility == Visibility.Visible)
+            {
+                // Esc often moves focus off the text field; keep the keyboard up for a
+                // short window so combos like Ctrl+Alt+Esc don't dismiss it.
+                if (DateTime.Now < _suppressHideUntil)
+                    return;
+                _hideTimer.Start();
+            }
+        }
+
+        // Reads only cached properties/patterns (populated by the CacheRequest at subscription).
+        private static bool IsEditableTextField(AutomationElement element)
+        {
+            var ct = element.Cached.ControlType;
 
             // Standard text fields, and document surfaces used by terminals/editors
             // (e.g. consoles, Claude Code) which expose their content as a Document.
@@ -253,18 +271,18 @@ namespace DesktopKeyboard
 
             try
             {
-                if (element.TryGetCurrentPattern(ValuePattern.Pattern, out object? valueObj) &&
+                if (element.TryGetCachedPattern(ValuePattern.Pattern, out object? valueObj) &&
                     valueObj is ValuePattern vp)
                 {
-                    string name = element.Current.Name ?? "";
+                    string name = element.Cached.Name ?? "";
                     if (name.Length < 3 || IsLikelyFileName(name))
                         return false;
-                    return !vp.Current.IsReadOnly;
+                    return !vp.Cached.IsReadOnly;
                 }
 
                 // A TextPattern means an editable/selectable text surface — covers rich
                 // editors and terminal-style apps whose control type is Pane/Custom.
-                if (element.TryGetCurrentPattern(TextPattern.Pattern, out object? textObj) && textObj != null)
+                if (element.TryGetCachedPattern(TextPattern.Pattern, out object? textObj) && textObj != null)
                     return true;
             }
             catch { }
@@ -272,7 +290,7 @@ namespace DesktopKeyboard
             return false;
         }
 
-        private bool IsLikelyFileName(string name)
+        private static bool IsLikelyFileName(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) return true;
             return name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
