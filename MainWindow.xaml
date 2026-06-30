@@ -120,8 +120,8 @@
                             HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10,3,0,0"
                             Width="60" Height="38" FontSize="16" Click="Key_Click"/>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,10,0">
-                        <Button x:Name="BtnTheme" Content="🎨 Theme" Style="{StaticResource TopIconStyle}" Width="95" Click="ThemeButton_Click"/>
-                        <Button x:Name="BtnLayout" Content="⌨ Base" Style="{StaticResource TopIconStyle}" Width="80" Click="LayoutButton_Click"/>
+                        <Button x:Name="BtnTheme" Content="🎨" Style="{StaticResource TopIconStyle}" Width="44" Click="ThemeButton_Click"/>
+                        <Button x:Name="BtnLayout" Content="⌨" Style="{StaticResource TopIconStyle}" Width="44" Click="LayoutButton_Click"/>
                         <Button Content="✕" Style="{StaticResource TopIconStyle}" Width="40" FontSize="20" Click="CloseButton_Click"/>
                     </StackPanel>
 

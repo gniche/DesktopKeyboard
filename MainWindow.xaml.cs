@@ -21,6 +21,7 @@ namespace DesktopKeyboard
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOACTIVATE = 0x0010;
 
         [DllImport("user32.dll")] public static extern IntPtr SetWindowLong(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
         [DllImport("user32.dll")] public static extern IntPtr GetWindowLong(IntPtr hWnd, int nIndex);
@@ -71,7 +72,6 @@ namespace DesktopKeyboard
         private string? _longPressTag;
         private bool _longPressActive;
         private bool _longPressFired;
-        private bool isManuallyHidden = false;
 
         private enum KeyboardMode { Auto, Show, Hide }
         private KeyboardMode currentMode = KeyboardMode.Auto;
@@ -94,7 +94,6 @@ namespace DesktopKeyboard
         private const string RunKey      = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValue    = "DesktopKeyboard";
 
-        private readonly string[] layoutNames = { "⌨ Base", "⌨ Nav", "⌨ Fn", "⌨ Full" };
         private readonly (double W, double H)[] layoutSizes =
         {
             (850,  360),
@@ -145,9 +144,8 @@ namespace DesktopKeyboard
             _hideTimer.Stop();
             if (currentMode != KeyboardMode.Auto) return;
             if (DateTime.Now < _suppressHideUntil) return;
-            if (!isManuallyHidden && this.Visibility == Visibility.Visible)
+            if (this.Visibility == Visibility.Visible)
             {
-                Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] HIDING keyboard (no text field focused)");
                 this.Visibility = Visibility.Collapsed;
                 ThemePopup.IsOpen = false;
             }
@@ -163,33 +161,23 @@ namespace DesktopKeyboard
 
             Dispatcher.Invoke(() =>
             {
-                string elementInfo = GetElementDebugInfo(fe);
-                bool isTextField = IsEditableTextField(fe);
-
-                Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Focus changed → {elementInfo} | Editable: {isTextField}");
-
-                if (isTextField)
+                if (IsEditableTextField(fe))
                 {
                     _hideTimer.Stop();
-                    isManuallyHidden = false;
 
                     if (this.Visibility != Visibility.Visible)
-                    {
-                        Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] SHOWING keyboard");
                         this.Visibility = Visibility.Visible;
-                    }
 
                     var helper = new WindowInteropHelper(this);
                     SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                     BringModeButtonToFront();
                 }
-                else if (!isManuallyHidden && this.Visibility == Visibility.Visible)
+                else if (this.Visibility == Visibility.Visible)
                 {
                     // Esc often moves focus off the text field; keep the keyboard up for a
                     // short window so combos like Ctrl+Alt+Esc don't dismiss it.
                     if (DateTime.Now < _suppressHideUntil)
                         return;
-                    Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Starting hide timer (200ms)...");
                     _hideTimer.Start();
                 }
             });
@@ -200,15 +188,11 @@ namespace DesktopKeyboard
             if (element == null) return false;
 
             var ct = element.Current.ControlType;
-            string ctName = ct?.ProgrammaticName ?? "Unknown";
 
             // Standard text fields, and document surfaces used by terminals/editors
             // (e.g. consoles, Claude Code) which expose their content as a Document.
             if (ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.Document)
-            {
-                Debug.WriteLine($"    → Accepted: {ctName} (text field / document)");
                 return true;
-            }
 
             // Clearly non-text controls — reject outright. Note Pane/Group/Custom are NOT
             // here: terminals (and other editors) often focus a Pane/Custom element that
@@ -218,35 +202,23 @@ namespace DesktopKeyboard
                 ct == ControlType.TabItem   || ct == ControlType.CheckBox ||
                 ct == ControlType.RadioButton || ct == ControlType.Hyperlink ||
                 ct == ControlType.Image     || ct == ControlType.ScrollBar)
-            {
-                Debug.WriteLine($"    → Rejected: {ctName} (common false positive)");
                 return false;
-            }
 
             try
             {
                 if (element.TryGetCurrentPattern(ValuePattern.Pattern, out object? valueObj) &&
                     valueObj is ValuePattern vp)
                 {
-                    bool readOnly = vp.Current.IsReadOnly;
-                    Debug.WriteLine($"    → ValuePattern found | IsReadOnly: {readOnly}");
-
                     string name = element.Current.Name ?? "";
                     if (name.Length < 3 || IsLikelyFileName(name))
-                    {
-                        Debug.WriteLine($"    → Rejected ValuePattern (looks like filename/folder)");
                         return false;
-                    }
-                    return !readOnly;
+                    return !vp.Current.IsReadOnly;
                 }
 
                 // A TextPattern means an editable/selectable text surface — covers rich
                 // editors and terminal-style apps whose control type is Pane/Custom.
                 if (element.TryGetCurrentPattern(TextPattern.Pattern, out object? textObj) && textObj != null)
-                {
-                    Debug.WriteLine("    → TextPattern found (rich editor / terminal)");
                     return true;
-                }
             }
             catch { }
 
@@ -261,26 +233,11 @@ namespace DesktopKeyboard
                    (name.Contains('.') && name.Length > 6);
         }
 
-        private string GetElementDebugInfo(AutomationElement element)
+        private void TopBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            try
-            {
-                string name = element.Current.Name ?? "(no name)";
-                string className = element.Current.ClassName ?? "(no class)";
-                string ctName = element.Current.ControlType?.ProgrammaticName ?? "Unknown";
-
-                if (name.Length > 60)
-                    name = name.Substring(0, 57) + "...";
-
-                return $"ControlType: {ctName} | Name: \"{name}\" | Class: {className}";
-            }
-            catch
-            {
-                return "Error getting element info";
-            }
+            this.DragMove();                // blocks until released
+            BringModeButtonToFront();       // dragging re-raises the keyboard; restore order
         }
-
-        private void TopBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) => this.DragMove();
 
         private void CloseButton_Click(object sender, RoutedEventArgs e)
         {
@@ -334,8 +291,6 @@ namespace DesktopKeyboard
             Layout3Panel.Visibility = currentLayoutState == 2 ? Visibility.Visible : Visibility.Collapsed;
             Layout4Panel.Visibility = currentLayoutState == 3 ? Visibility.Visible : Visibility.Collapsed;
 
-            BtnLayout.Content = layoutNames[currentLayoutState];
-
             var (w, h) = layoutSizes[currentLayoutState];
             MainBorder.Width  = w;
             MainBorder.Height = h;
@@ -383,10 +338,11 @@ namespace DesktopKeyboard
             };
 
             // Click cycles the mode; a drag moves the keyboard (the button is the handle
-            // that stays visible when the keyboard is hidden).
+            // that stays visible when the keyboard is hidden). Click (not a captured
+            // up handler) is used for the tap so it works reliably for mouse and touch.
+            _modeButton.Click                      += ModeButton_Click;
             _modeButton.PreviewMouseLeftButtonDown += ModeButton_Down;
             _modeButton.PreviewMouseMove           += ModeButton_Move;
-            _modeButton.PreviewMouseLeftButtonUp   += ModeButton_Up;
 
             _modeBorder = new Border
             {
@@ -441,11 +397,29 @@ namespace DesktopKeyboard
         }
 
         // Keep the mode button drawn above the keyboard when the keyboard (re)appears.
+        // Both windows are topmost, which does not define their order relative to each
+        // other, so we explicitly insert the keyboard directly *below* the mode window.
         private void BringModeButtonToFront()
         {
             if (_modeWindow == null) return;
-            var h = new WindowInteropHelper(_modeWindow).Handle;
-            if (h != IntPtr.Zero) SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            var modeH = new WindowInteropHelper(_modeWindow).Handle;
+            var kbH   = new WindowInteropHelper(this).Handle;
+            if (modeH == IntPtr.Zero) return;
+
+            // Defer so it runs after the keyboard's own show/topmost calls have settled.
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+            {
+                SetWindowPos(modeH, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                if (kbH != IntPtr.Zero)
+                    SetWindowPos(kbH, modeH, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            });
+        }
+
+        private void ModeButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Swallow the click that ends a drag; a real tap cycles the mode.
+            if (_modeDragging) { _modeDragging = false; return; }
+            CycleMode();
         }
 
         private void ModeButton_Down(object sender, MouseButtonEventArgs e)
@@ -453,12 +427,11 @@ namespace DesktopKeyboard
             GetCursorPos(out _modeDragStart);
             _modeDragLast = _modeDragStart;
             _modeDragging = false;
-            _modeButton?.CaptureMouse();
         }
 
         private void ModeButton_Move(object sender, MouseEventArgs e)
         {
-            if (e.LeftButton != MouseButtonState.Pressed || _modeButton?.IsMouseCaptured != true) return;
+            if (e.LeftButton != MouseButtonState.Pressed) return;
 
             GetCursorPos(out POINT cur);
             if (!_modeDragging &&
@@ -467,18 +440,13 @@ namespace DesktopKeyboard
 
             if (_modeDragging)
             {
+                // Move the keyboard; the button follows via RepositionModeButton so the
+                // pointer stays over it and further move events keep arriving (no capture).
                 this.Left += cur.X - _modeDragLast.X;
                 this.Top  += cur.Y - _modeDragLast.Y;
                 _modeDragLast = cur;
                 RepositionModeButton();
             }
-        }
-
-        private void ModeButton_Up(object sender, MouseButtonEventArgs e)
-        {
-            _modeButton?.ReleaseMouseCapture();
-            if (!_modeDragging) CycleMode();   // a tap (no drag) cycles the mode
-            _modeDragging = false;
         }
 
         private void CycleMode()
@@ -499,7 +467,6 @@ namespace DesktopKeyboard
             {
                 case KeyboardMode.Show:
                     _hideTimer.Stop();
-                    isManuallyHidden = false;
                     this.Visibility = Visibility.Visible;
                     var helper = new WindowInteropHelper(this);
                     SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -515,7 +482,6 @@ namespace DesktopKeyboard
 
                 case KeyboardMode.Auto:
                     // Visibility now resolves from input focus on the next focus change.
-                    isManuallyHidden = false;
                     break;
             }
             UpdateModeButton();
