@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Threading;
 
 namespace DesktopKeyboard
@@ -56,9 +57,11 @@ namespace DesktopKeyboard
         private KeyboardMode currentMode = KeyboardMode.Auto;
         private Window? _modeWindow;
         private Button? _modeButton;
+        private TextBlock? _modeText;
 
         private bool runOnStartup = false;
-        private bool _loading = false;   // suppresses SaveSettings while applying loaded values
+        private bool _loading = false;        // suppresses SaveSettings while applying loaded values
+        private bool _suppressHideOnce = false; // keeps keyboard up after Esc moves focus
 
         private const string SettingsKey = @"Software\serifpersia\DesktopKeyboard";
         private const string RunKey      = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -82,6 +85,15 @@ namespace DesktopKeyboard
             _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _hideTimer.Tick += HideTimer_Tick;
 
+            // Create the floating mode button and restore settings as soon as the message
+            // loop starts — this runs at startup independent of the main window ever being
+            // shown (its HWND isn't created until the keyboard first becomes visible).
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+            {
+                CreateModeButton();
+                LoadSettings();
+            });
+
             // Defer UIA registration until after the window is shown — initializing
             // the UIA COM infrastructure on the UI thread blocks startup for several seconds.
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
@@ -96,11 +108,6 @@ namespace DesktopKeyboard
             var helper = new WindowInteropHelper(this);
             SetWindowLong(helper.Handle, GWL_EXSTYLE, new IntPtr(GetWindowLong(helper.Handle, GWL_EXSTYLE).ToInt64() | WS_EX_NOACTIVATE));
             SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-
-            // Create the floating mode button and restore saved settings immediately at
-            // startup — independent of whether the keyboard itself is visible yet.
-            CreateModeButton();
-            LoadSettings();
         }
 
         private void HideTimer_Tick(object? sender, EventArgs e)
@@ -146,6 +153,13 @@ namespace DesktopKeyboard
                 }
                 else if (!isManuallyHidden && this.Visibility == Visibility.Visible)
                 {
+                    // Esc often moves focus off the text field; keep the keyboard up once
+                    // so combos like Ctrl+Alt+Esc don't dismiss it.
+                    if (_suppressHideOnce)
+                    {
+                        _suppressHideOnce = false;
+                        return;
+                    }
                     Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Starting hide timer (200ms)...");
                     _hideTimer.Start();
                 }
@@ -304,15 +318,24 @@ namespace DesktopKeyboard
         {
             if (_modeWindow != null) return;
 
+            // White label with a black halo so it stays readable at 50% opacity.
+            _modeText = new TextBlock
+            {
+                Text = "Auto",
+                FontSize = 14,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 4, ShadowDepth = 0, Opacity = 1 }
+            };
+
             _modeButton = new Button
             {
-                Content = "Auto",
-                FontSize = 18,
-                FontWeight = FontWeights.SemiBold,
-                Width = 90,
-                Height = 56,
+                Content = _modeText,
+                Width = 64,
+                Height = 40,
                 Focusable = false,
-                Foreground = Brushes.White,
                 BorderThickness = new Thickness(0),
                 Cursor = Cursors.Hand
             };
@@ -321,22 +344,24 @@ namespace DesktopKeyboard
             var grip = new TextBlock
             {
                 Text = "⠿",
-                FontSize = 24,
+                FontSize = 18,
                 Foreground = Brushes.White,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(10, 0, 6, 0),
-                Cursor = Cursors.SizeAll
+                Margin = new Thickness(8, 0, 4, 0),
+                Cursor = Cursors.SizeAll,
+                Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 4, ShadowDepth = 0, Opacity = 1 }
             };
 
             var panel = new StackPanel { Orientation = Orientation.Horizontal };
             panel.Children.Add(grip);
             panel.Children.Add(_modeButton);
 
+            // 50% opacity on the body; the text/grip keep full opacity via their halo.
             var border = new Border
             {
-                Background = new SolidColorBrush(Color.FromRgb(34, 34, 34)),
+                Background = new SolidColorBrush(Color.FromRgb(34, 34, 34)) { Opacity = 0.5 },
                 CornerRadius = new CornerRadius(8),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(74, 144, 226)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(74, 144, 226)) { Opacity = 0.5 },
                 BorderThickness = new Thickness(2),
                 Child = panel
             };
@@ -426,8 +451,8 @@ namespace DesktopKeyboard
                 _                 => ("Auto", Color.FromRgb(74, 144, 226)),  // blue
             };
 
-            _modeButton.Content = text;
-            _modeButton.Background = new SolidColorBrush(color);
+            if (_modeText != null) _modeText.Text = text;
+            _modeButton.Background = new SolidColorBrush(color) { Opacity = 0.5 };
         }
 
         private void ThemeButton_Click(object sender, RoutedEventArgs e)
@@ -637,6 +662,13 @@ namespace DesktopKeyboard
             if (sender is Button btn && btn.Tag != null)
             {
                 string tag = btn.Tag.ToString() ?? "";
+
+                if (tag == "ESC")
+                {
+                    // Don't let Esc's focus change auto-hide the keyboard.
+                    _suppressHideOnce = true;
+                    _hideTimer.Stop();
+                }
 
                 if (tag == "TOGGLE_SHIFT")
                 {

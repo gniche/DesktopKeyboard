@@ -99,6 +99,9 @@
 
                 <!-- Top bar -->
                 <Grid Grid.Row="0" Background="Transparent" MouseLeftButtonDown="TopBar_MouseLeftButtonDown">
+                    <Button Content="Esc" Tag="ESC" Style="{StaticResource KeyStyle}" Background="#252525"
+                            HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10,3,0,0"
+                            Width="60" Height="38" FontSize="16" Click="Key_Click"/>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,10,0">
                         <Button x:Name="BtnTheme" Content="🎨 Theme" Style="{StaticResource TopIconStyle}" Width="95" Click="ThemeButton_Click"/>
                         <Button x:Name="BtnLayout" Content="⌨ Base" Style="{StaticResource TopIconStyle}" Width="80" Click="LayoutButton_Click"/>
@@ -357,8 +360,7 @@
                     </Grid.RowDefinitions>
 
                     <!-- F-key row -->
-                    <UniformGrid Grid.Row="0" Rows="1" Columns="13">
-                        <Button Style="{StaticResource KeyStyle}" Content="Esc" Tag="ESC" Click="Key_Click" FontSize="16"/>
+                    <UniformGrid Grid.Row="0" Rows="1" Columns="12">
                         <Button Style="{StaticResource KeyStyle}" Content="F1"  Tag="F1"  Click="Key_Click" FontSize="16"/>
                         <Button Style="{StaticResource KeyStyle}" Content="F2"  Tag="F2"  Click="Key_Click" FontSize="16"/>
                         <Button Style="{StaticResource KeyStyle}" Content="F3"  Tag="F3"  Click="Key_Click" FontSize="16"/>
@@ -489,8 +491,7 @@
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
-                        <UniformGrid Grid.Row="0" Rows="1" Columns="13">
-                            <Button Style="{StaticResource KeyStyle}" Content="Esc" Tag="ESC" Click="Key_Click" FontSize="16"/>
+                        <UniformGrid Grid.Row="0" Rows="1" Columns="12">
                             <Button Style="{StaticResource KeyStyle}" Content="F1"  Tag="F1"  Click="Key_Click" FontSize="16"/>
                             <Button Style="{StaticResource KeyStyle}" Content="F2"  Tag="F2"  Click="Key_Click" FontSize="16"/>
                             <Button Style="{StaticResource KeyStyle}" Content="F3"  Tag="F3"  Click="Key_Click" FontSize="16"/>
