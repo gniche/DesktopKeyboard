@@ -193,12 +193,12 @@ namespace DesktopKeyboard
 
         // Subscribe to system-wide focus changes under a CacheRequest so each event delivers
         // the focused element with its ControlType, Name and the Value/Text patterns already
-        // cached. Reading those is then local (no per-focus cross-process round-trips), and
-        // AutomationElementMode.None keeps the elements lightweight since we never need a live
-        // reference — we only read the cached data.
+        // cached. Reading those is then local (no per-focus cross-process round-trips). The
+        // element keeps the default Full mode (a live backing reference); None mode yields
+        // fragile elements whose cached COM access can fault the process.
         private void RegisterFocusTracking()
         {
-            var cache = new CacheRequest { AutomationElementMode = AutomationElementMode.None };
+            var cache = new CacheRequest();
             cache.Add(AutomationElement.ControlTypeProperty);
             cache.Add(AutomationElement.NameProperty);
             cache.Add(ValuePattern.Pattern);
