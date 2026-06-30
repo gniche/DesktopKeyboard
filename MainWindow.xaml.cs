@@ -25,12 +25,34 @@ namespace DesktopKeyboard
 
         [DllImport("user32.dll")] public static extern IntPtr SetWindowLong(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
         [DllImport("user32.dll")] public static extern IntPtr GetWindowLong(IntPtr hWnd, int nIndex);
-        [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
         [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT lpPoint);
 
+        // SendInput supersedes keybd_event and delivers the whole batch atomically in one
+        // syscall, so a key + its modifiers can't be interleaved with real user input.
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+        private const uint INPUT_KEYBOARD = 1;
+
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT { public int X; public int Y; }
+
+        // INPUT carries a union; for keyboard input only the KEYBDINPUT member is used. The
+        // explicit padding mirrors the largest union member (MOUSEINPUT) so the struct size
+        // matches the native layout on x64.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct INPUT { public uint type; public KEYBDINPUT ki; public int _padA; public int _padB; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KEYBDINPUT
+        {
+            public ushort wVk;
+            public ushort wScan;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
 
         private const uint KEYEVENTF_KEYUP = 0x0002;
         private const byte VK_LSHIFT   = 0xA0;
@@ -786,9 +808,21 @@ namespace DesktopKeyboard
             }
         }
 
+        // Reusable input batch (SendKey runs on the UI thread only, so a shared buffer is
+        // safe) and the cached native struct size, to avoid per-keypress allocations.
+        private readonly INPUT[] _inputBuf = new INPUT[10];
+        private static readonly int InputSize = Marshal.SizeOf<INPUT>();
+
+        private static INPUT KeyInput(ushort vk, bool up) => new()
+        {
+            type = INPUT_KEYBOARD,
+            ki = new KEYBDINPUT { wVk = vk, dwFlags = up ? KEYEVENTF_KEYUP : 0 },
+        };
+
         // Sends a keypress wrapped in whatever modifiers are currently active, then clears
         // any one-shot modifiers. The active modifiers are held down around the key event so
-        // combos like Ctrl+C or Win+E reach the target app.
+        // combos like Ctrl+C or Win+E reach the target app. The whole sequence goes out in a
+        // single atomic SendInput call.
         private void SendKey(byte vk)
         {
             bool ctrl  = _mod["TOGGLE_CTRL"]  != ModState.Off;
@@ -796,18 +830,21 @@ namespace DesktopKeyboard
             bool shift = _mod["TOGGLE_SHIFT"] != ModState.Off;
             bool win   = _mod["TOGGLE_WIN"]   != ModState.Off;
 
-            if (ctrl)  keybd_event(VK_LCONTROL, 0, 0, 0);
-            if (alt)   keybd_event(VK_LMENU, 0, 0, 0);
-            if (shift) keybd_event(VK_LSHIFT, 0, 0, 0);
-            if (win)   keybd_event(VK_LWIN, 0, 0, 0);
+            int n = 0;
+            if (ctrl)  _inputBuf[n++] = KeyInput(VK_LCONTROL, false);
+            if (alt)   _inputBuf[n++] = KeyInput(VK_LMENU, false);
+            if (shift) _inputBuf[n++] = KeyInput(VK_LSHIFT, false);
+            if (win)   _inputBuf[n++] = KeyInput(VK_LWIN, false);
 
-            keybd_event(vk, 0, 0, 0);
-            keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
+            _inputBuf[n++] = KeyInput(vk, false);
+            _inputBuf[n++] = KeyInput(vk, true);
 
-            if (win)   keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
-            if (shift) keybd_event(VK_LSHIFT, 0, KEYEVENTF_KEYUP, 0);
-            if (alt)   keybd_event(VK_LMENU, 0, KEYEVENTF_KEYUP, 0);
-            if (ctrl)  keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0);
+            if (win)   _inputBuf[n++] = KeyInput(VK_LWIN, true);
+            if (shift) _inputBuf[n++] = KeyInput(VK_LSHIFT, true);
+            if (alt)   _inputBuf[n++] = KeyInput(VK_LMENU, true);
+            if (ctrl)  _inputBuf[n++] = KeyInput(VK_LCONTROL, true);
+
+            SendInput((uint)n, _inputBuf, InputSize);
 
             ConsumeOneShotModifiers();
         }
