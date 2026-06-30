@@ -13,6 +13,14 @@
     <PublishReadyToRun>true</PublishReadyToRun>
     <TieredCompilation>true</TieredCompilation>
     <TieredPGO>true</TieredPGO>
+
+    <!-- Startup/memory trims. No localization or culture-specific formatting is used (all
+         parsing/formatting goes through CultureInfo.InvariantCulture), so skip loading ICU.
+         Workstation, non-concurrent GC drops the background GC thread and trims working set;
+         this app allocates very little, so the latency tradeoff is irrelevant. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
