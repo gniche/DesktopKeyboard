@@ -79,10 +79,13 @@ public class MainWindow : Window
     private readonly IClassicDesktopStyleApplicationLifetime _desktop;
     private IntPtr _hwnd;
     private bool _opened;
-    private PixelPoint _kbPos;          // window top-left in screen px (anchor for show/hide/resize)
+    private PixelPoint _modeAnchor;     // screen px the mode-button centre is pinned to
     private bool _bodyVisible;          // are the keys shown (vs. just the top row)
     private bool _focusEditable;        // last UIA focus classification (Auto mode)
+    private bool _chromeExpanded = true; // Esc + theme/layout/close shown (vs. collapsed behind the toggle)
     private StackPanel _bodyRow = null!;          // keyboard + numpad; collapses when hidden
+    private Key _escKey = null!;
+    private StackPanel _chromeGroup = null!;       // theme / layout / close
     private LayoutTransformControl _scaler = null!;
     private readonly ScaleTransform _scale = new(1, 1);   // size preset -> key size; window fits via SizeToContent
 
@@ -223,7 +226,7 @@ public class MainWindow : Window
             if (_modeDragging)
             {
                 Position = new PixelPoint(f.X - _grabX, f.Y - _grabY);
-                SyncKbPosFromWindow();
+                SyncAnchorFromMode();
             }
         };
         _modeBg.PointerReleased += (_, e) =>
@@ -238,40 +241,39 @@ public class MainWindow : Window
 
     private Control BuildTopBar()
     {
-        // Columns: Esc | flexible | mode button | flexible | theme/layout/close. The flexible
-        // spacers centre the mode button when shown wide, and collapse to a compact strip when
-        // the body is hidden (so the persistent top row stays tidy).
-        var bar = new Grid { Background = Brushes.Transparent, Height = 44, HorizontalAlignment = HorizontalAlignment.Stretch };
-        bar.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
-        bar.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
-        bar.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
-        bar.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
-        bar.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
+        // Centred row: [Esc] [mode] [toggle] [theme/layout/close]. Only the mode button and the
+        // toggle are persistent; Esc and the chrome group collapse behind the toggle (and when
+        // the keyboard hides), so the hidden strip is just mode + toggle. The window is anchored
+        // on the mode button's centre, so it never moves as things expand/collapse.
+        var bar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Background = Brushes.Transparent,
+            Height = 44,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
 
-        var esc = MakeKey("ESC", "Esc", 16);
-        esc.VerticalAlignment = VerticalAlignment.Center;
-        esc.Width = 60; esc.Height = 38;
-        Grid.SetColumn(esc, 0);
-        bar.Children.Add(esc);
+        _escKey = MakeKey("ESC", "Esc", 16);
+        _escKey.VerticalAlignment = VerticalAlignment.Center;
+        _escKey.Width = 60; _escKey.Height = 38; _escKey.Margin = new Thickness(2, 0, 2, 0);
 
         var mode = BuildModeButton();
-        Grid.SetColumn(mode, 2);
-        bar.Children.Add(mode);
+        mode.Margin = new Thickness(2, 0, 2, 0);
+
+        var toggle = ChromeButton("⋯", 18, () => SetChromeExpanded(!_chromeExpanded));
 
         var themeBtn = ChromeButton("🎨", 16, () => _themePopup.IsOpen = !_themePopup.IsOpen);
         var layoutBtn = ChromeButton("⌨", 16, () => { SetLayout((currentLayoutState + 1) % 2); SaveSettings(); });
         var closeBtn = ChromeButton("✕", 20, RequestClose);
+        _chromeGroup = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        _chromeGroup.Children.Add(themeBtn);
+        _chromeGroup.Children.Add(layoutBtn);
+        _chromeGroup.Children.Add(closeBtn);
 
-        var right = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        right.Children.Add(themeBtn);
-        right.Children.Add(layoutBtn);
-        right.Children.Add(closeBtn);
-        Grid.SetColumn(right, 4);
-        bar.Children.Add(right);
+        bar.Children.Add(_escKey);
+        bar.Children.Add(mode);
+        bar.Children.Add(toggle);
+        bar.Children.Add(_chromeGroup);
 
         _themePopup = new Popup
         {
@@ -300,7 +302,7 @@ public class MainWindow : Window
             if (!ReferenceEquals(e.Pointer.Captured, bar)) return;
             var p = this.PointToScreen(e.GetPosition(this));
             Position = new PixelPoint(p.X - _grabX, p.Y - _grabY);
-            SyncKbPosFromWindow();
+            SyncAnchorFromMode();
         };
         bar.PointerReleased += (_, e) => e.Pointer.Capture(null);
 
@@ -456,37 +458,61 @@ public class MainWindow : Window
         _opened = true;
     }
 
-    // Default keyboard position: bottom-centre of the work area (px).
+    // Default anchor: mode-button centre at bottom-centre of the work area, with the keys
+    // extending downward to near the bottom edge.
     private void InitDefaultPosition()
     {
         double rs = RenderScaling > 0 ? RenderScaling : 1;
         double s = _scale.ScaleX;
         var wa = Screens.Primary?.WorkingArea ?? new PixelRect(0, 0, 1920, 1080);
-        int w = (int)((KbW + 16) * s * rs);
-        int h = (int)((44 + 5 * RowH + 16) * s * rs);
-        _kbPos = new PixelPoint(wa.X + (wa.Width - w) / 2, wa.Y + wa.Height - h - 40);
+        _modeAnchor = new PixelPoint(
+            wa.X + wa.Width / 2,
+            (int)(wa.Y + wa.Height - (5 * RowH) * s * rs - 40));
     }
 
-    // Show/hide the keys (the window auto-sizes via SizeToContent); the top row with the mode
-    // button always stays. The window top-left is anchored to _kbPos.
+    // Show/hide the keys + chrome; the window auto-sizes (SizeToContent), then we re-pin the
+    // mode-button centre to _modeAnchor so it never moves as things expand/collapse.
     private void UpdateGeometry()
     {
         _bodyVisible = currentMode == KeyboardMode.Show ||
                        (currentMode == KeyboardMode.Auto && _focusEditable);
         _bodyRow.IsVisible = _bodyVisible;
-        ReassertWindow();
+        SetChromeExpanded(_bodyVisible);   // also re-anchors
     }
 
-    // Re-anchor position and topmost after a SizeToContent change (which can run async).
-    private void ReassertWindow()
+    // Show/hide Esc + theme/layout/close, then re-anchor.
+    private void SetChromeExpanded(bool on)
+    {
+        _chromeExpanded = on;
+        if (_escKey != null) _escKey.IsVisible = on;
+        if (_chromeGroup != null) _chromeGroup.IsVisible = on;
+        if (!on) _themePopup.IsOpen = false;
+        AnchorToMode();
+    }
+
+    // Shift the window so the mode-button centre sits at _modeAnchor (after layout settles).
+    private void AnchorToMode()
     {
         if (!_opened) return;
-        Position = _kbPos;
         MakeTopmost(_hwnd);
-        Dispatcher.UIThread.Post(() => { Position = _kbPos; MakeTopmost(_hwnd); }, DispatcherPriority.Background);
+        Dispatcher.UIThread.Post(() =>
+        {
+            var b = _modeBg.Bounds;
+            if (b.Width > 0)
+            {
+                var c = _modeBg.PointToScreen(new Point(b.Width / 2, b.Height / 2));
+                Position = new PixelPoint(Position.X + (_modeAnchor.X - c.X), Position.Y + (_modeAnchor.Y - c.Y));
+            }
+            MakeTopmost(_hwnd);
+        }, DispatcherPriority.Loaded);
     }
 
-    private void SyncKbPosFromWindow() => _kbPos = Position;
+    private void SyncAnchorFromMode()
+    {
+        var b = _modeBg.Bounds;
+        if (b.Width <= 0) return;
+        _modeAnchor = _modeBg.PointToScreen(new Point(b.Width / 2, b.Height / 2));
+    }
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
@@ -639,7 +665,7 @@ public class MainWindow : Window
     {
         currentSizeState = state;
         _scale.ScaleX = _scale.ScaleY = state switch { 0 => 0.78, 2 => 1.3, _ => 1.0 };
-        ReassertWindow();
+        AnchorToMode();
         if (_sizeLabel != null)
             _sizeLabel.Text = "Size: " + (state switch { 0 => "Small", 2 => "Large", _ => "Medium" });
     }
@@ -679,7 +705,7 @@ public class MainWindow : Window
 
         foreach (var t in ModTags) SetModState(t, ModState.Off, updateLabels: false);
         UpdateKeys();
-        ReassertWindow();
+        AnchorToMode();
     }
 
     private void CycleMode()
