@@ -32,6 +32,9 @@
 
   <ItemGroup>
     <Compile Remove="DesktopKeyboard.Tests\**" />
+    <!-- The Avalonia perf spike is a separate project; keep its sources out of this build. -->
+    <Compile Remove="spike\**" />
+    <None Remove="spike\**" />
   </ItemGroup>
 
   <ItemGroup>
