@@ -62,7 +62,7 @@ namespace DesktopKeyboard
         private bool runOnStartup = false;
         private bool _loading = false;          // suppresses SaveSettings while applying loaded values
         private bool _settingsLoaded = false;   // blocks SaveSettings until the initial load finishes
-        private bool _suppressHideOnce = false; // keeps keyboard up after Esc moves focus
+        private DateTime _suppressHideUntil = DateTime.MinValue; // keeps keyboard up after Esc moves focus
 
         private const string SettingsKey = @"Software\serifpersia\DesktopKeyboard";
         private const string RunKey      = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -115,6 +115,7 @@ namespace DesktopKeyboard
         {
             _hideTimer.Stop();
             if (currentMode != KeyboardMode.Auto) return;
+            if (DateTime.Now < _suppressHideUntil) return;
             if (!isManuallyHidden && this.Visibility == Visibility.Visible)
             {
                 Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] HIDING keyboard (no text field focused)");
@@ -154,13 +155,10 @@ namespace DesktopKeyboard
                 }
                 else if (!isManuallyHidden && this.Visibility == Visibility.Visible)
                 {
-                    // Esc often moves focus off the text field; keep the keyboard up once
-                    // so combos like Ctrl+Alt+Esc don't dismiss it.
-                    if (_suppressHideOnce)
-                    {
-                        _suppressHideOnce = false;
+                    // Esc often moves focus off the text field; keep the keyboard up for a
+                    // short window so combos like Ctrl+Alt+Esc don't dismiss it.
+                    if (DateTime.Now < _suppressHideUntil)
                         return;
-                    }
                     Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Starting hide timer (200ms)...");
                     _hideTimer.Start();
                 }
@@ -174,14 +172,22 @@ namespace DesktopKeyboard
             var ct = element.Current.ControlType;
             string ctName = ct?.ProgrammaticName ?? "Unknown";
 
-            if (ct == ControlType.Edit || ct == ControlType.ComboBox)
+            // Standard text fields, and document surfaces used by terminals/editors
+            // (e.g. consoles, Claude Code) which expose their content as a Document.
+            if (ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.Document)
             {
-                Debug.WriteLine($"    → Accepted: {ctName} (standard text field)");
+                Debug.WriteLine($"    → Accepted: {ctName} (text field / document)");
                 return true;
             }
 
+            // Clearly non-text controls — reject outright. Note Pane/Group/Custom are NOT
+            // here: terminals (and other editors) often focus a Pane/Custom element that
+            // carries a TextPattern, so let the pattern checks below decide for those.
             if (ct == ControlType.ListItem || ct == ControlType.TreeItem ||
-                ct == ControlType.Button || ct == ControlType.Group || ct == ControlType.Pane)
+                ct == ControlType.Button    || ct == ControlType.MenuItem ||
+                ct == ControlType.TabItem   || ct == ControlType.CheckBox ||
+                ct == ControlType.RadioButton || ct == ControlType.Hyperlink ||
+                ct == ControlType.Image     || ct == ControlType.ScrollBar)
             {
                 Debug.WriteLine($"    → Rejected: {ctName} (common false positive)");
                 return false;
@@ -204,9 +210,11 @@ namespace DesktopKeyboard
                     return !readOnly;
                 }
 
+                // A TextPattern means an editable/selectable text surface — covers rich
+                // editors and terminal-style apps whose control type is Pane/Custom.
                 if (element.TryGetCurrentPattern(TextPattern.Pattern, out object? textObj) && textObj != null)
                 {
-                    Debug.WriteLine("    → TextPattern found (rich editor)");
+                    Debug.WriteLine("    → TextPattern found (rich editor / terminal)");
                     return true;
                 }
             }
@@ -673,8 +681,10 @@ namespace DesktopKeyboard
 
                 if (tag == "ESC")
                 {
-                    // Don't let Esc's focus change auto-hide the keyboard.
-                    _suppressHideOnce = true;
+                    // Don't let Esc's focus change auto-hide the keyboard. Esc can fire
+                    // several focus events (e.g. closing a dialog then refocusing), so
+                    // suppress hides for a short window rather than just the next one.
+                    _suppressHideUntil = DateTime.Now.AddMilliseconds(800);
                     _hideTimer.Stop();
                 }
 

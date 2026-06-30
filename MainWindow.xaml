@@ -17,25 +17,42 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" CornerRadius="6">
+                        <Grid>
+                            <Border Background="{TemplateBinding Background}" CornerRadius="6"/>
+                            <!-- Press highlight overlay: snaps on when pressed, fades out over 0.2s on
+                                 release. A per-button overlay (not the shared Background brush) avoids
+                                 the touch "stuck highlight" since it doesn't depend on IsMouseOver. -->
+                            <Border x:Name="PressHighlight" Background="#40FFFFFF" CornerRadius="6" Opacity="0"/>
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3">
                                 <!-- Black halo keeps white glyphs readable even when keys are translucent -->
                                 <ContentPresenter.Effect>
                                     <DropShadowEffect Color="Black" BlurRadius="4" ShadowDepth="0" Opacity="1" RenderingBias="Quality"/>
                                 </ContentPresenter.Effect>
                             </ContentPresenter>
-                        </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PressHighlight" Storyboard.TargetProperty="Opacity"
+                                                             To="1" Duration="0:0:0"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PressHighlight" Storyboard.TargetProperty="Opacity"
+                                                             To="0" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
-            <Style.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#353535"/>
-                </Trigger>
-                <Trigger Property="IsPressed" Value="True">
-                    <Setter Property="Background" Value="#111111"/>
-                </Trigger>
-            </Style.Triggers>
         </Style>
         <Style TargetType="Button" x:Key="TopIconStyle" BasedOn="{StaticResource KeyStyle}">
             <Setter Property="Background" Value="Transparent"/>
@@ -99,9 +116,12 @@
 
                 <!-- Top bar -->
                 <Grid Grid.Row="0" Background="Transparent" MouseLeftButtonDown="TopBar_MouseLeftButtonDown">
-                    <Button Content="Esc" Tag="ESC" Style="{StaticResource KeyStyle}"
-                            HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10,3,0,0"
-                            Width="60" Height="38" FontSize="16" Click="Key_Click"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10,3,0,0">
+                        <Button Content="Esc" Tag="ESC" Style="{StaticResource KeyStyle}"
+                                Width="60" Height="38" FontSize="16" Click="Key_Click"/>
+                        <Button Content="Tab" Tag="TAB" Style="{StaticResource KeyStyle}"
+                                Width="60" Height="38" FontSize="16" Click="Key_Click"/>
+                    </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,10,0">
                         <Button x:Name="BtnTheme" Content="🎨 Theme" Style="{StaticResource TopIconStyle}" Width="95" Click="ThemeButton_Click"/>
                         <Button x:Name="BtnLayout" Content="⌨ Base" Style="{StaticResource TopIconStyle}" Width="80" Click="LayoutButton_Click"/>

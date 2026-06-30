@@ -22,7 +22,7 @@
 
 ## Requirements
 - Windows 10 or Windows 11 (x64 architecture).
-- .NET 9.0 Runtime (included automatically if using the installer).
+- [.NET 9.0 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) (x64). The installer stays compact by linking against the shared runtime rather than bundling it.
 
 ## Building from Source
 

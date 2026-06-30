@@ -14,19 +14,21 @@ if ($env:PATH -notlike "*$dotnetToolsPath*") {
     $env:PATH = "$dotnetToolsPath;$env:PATH"
 }
 
-# --- Publish app (self-contained, ReadyToRun) --------------------------------
-# Self-contained + ReadyToRun ships fully precompiled native images and the .NET
-# runtime, so the installed app starts fast and needs no separate runtime install.
+# --- Publish app (framework-dependent, ReadyToRun) ---------------------------
+# Framework-dependent (dynamic linking) keeps the install compact: it links against
+# the shared .NET Desktop Runtime instead of bundling it. The shared framework is
+# already ReadyToRun on disk, and our own assembly is R2R-compiled here, so startup
+# stays fast. Requires the .NET 9 Desktop Runtime to be installed on the target.
 
 $publishDir = "$root\publish"
 $rid        = "win-x64"
 
-Write-Host "Publishing DesktopKeyboard ($Configuration, $rid, ReadyToRun)..." -ForegroundColor Cyan
+Write-Host "Publishing DesktopKeyboard ($Configuration, $rid, framework-dependent ReadyToRun)..." -ForegroundColor Cyan
 Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
 dotnet publish "$root\DesktopKeyboard.csproj" `
     -c $Configuration `
     -r $rid `
-    --self-contained true `
+    --self-contained false `
     -o $publishDir
 if (-not $?) { exit 1 }
 
