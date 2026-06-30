@@ -1,38 +1,42 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net9.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UseWPF>true</UseWPF>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>keyboard.ico</ApplicationIcon>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
 
-    <!-- Precompile to native (ReadyToRun) for faster startup. RID/self-contained are
-         passed at publish time (see build.ps1) so the plain dev build stays unchanged. -->
+    <!-- GPU-composited transparency (Avalonia/Skia) replaces WPF's CPU layered-window blit. -->
     <PublishReadyToRun>true</PublishReadyToRun>
     <TieredCompilation>true</TieredCompilation>
     <TieredPGO>true</TieredPGO>
-
-    <!-- Startup/memory trims. No localization or culture-specific formatting is used (all
-         parsing/formatting goes through CultureInfo.InvariantCulture), so skip loading ICU.
-         Workstation, non-concurrent GC drops the background GC thread and trims working set;
-         this app allocates very little, so the latency tradeoff is irrelevant. -->
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
-
-    <!-- Framework feature switches: drop machinery this app never uses to trim metadata
-         and working set. Use terse (non-localized) framework exception strings, and disable
-         EventSource/ETW and HTTP activity propagation. -->
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
     <EventSourceSupport>false</EventSourceSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Minimal Avalonia: core + desktop (Win32 + Skia). No theme package — keys are drawn
+         from Borders/TextBlocks and the few chrome controls are custom, so nothing needs a
+         control theme. -->
+    <PackageReference Include="Avalonia" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
+  </ItemGroup>
+
+  <!-- For the system-wide focus detection we reuse the managed UI Automation client; this
+       makes UIAutomationClient/Types available without pulling in the WPF render stack. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Remove="DesktopKeyboard.Tests\**" />
-    <!-- The Avalonia perf spike is a separate project; keep its sources out of this build. -->
     <Compile Remove="spike\**" />
     <None Remove="spike\**" />
   </ItemGroup>
