@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
@@ -78,7 +79,6 @@ namespace DesktopKeyboard
         private Window? _modeWindow;
         private Button? _modeButton;
         private TextBlock? _modeText;
-        private Border? _modeBorder;
         private const double ModeBtnW = 96;
         private const double ModeBtnH = 32;
         private bool _modeDragging;
@@ -126,9 +126,20 @@ namespace DesktopKeyboard
         protected override void OnSourceInitialized(EventArgs e)
         {
             base.OnSourceInitialized(e);
-            var helper = new WindowInteropHelper(this);
-            SetWindowLong(helper.Handle, GWL_EXSTYLE, new IntPtr(GetWindowLong(helper.Handle, GWL_EXSTYLE).ToInt64() | WS_EX_NOACTIVATE));
-            SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            NoActivate(new WindowInteropHelper(this).Handle);
+        }
+
+        private static void MakeTopmost(IntPtr h) =>
+            SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+
+        // Make a window non-activating (never steals focus) and topmost; tool-window
+        // also keeps it out of alt-tab. Used by the keyboard and the mode button.
+        private static void NoActivate(IntPtr h, bool toolWindow = false)
+        {
+            long ex = GetWindowLong(h, GWL_EXSTYLE).ToInt64() | WS_EX_NOACTIVATE;
+            if (toolWindow) ex |= WS_EX_TOOLWINDOW;
+            SetWindowLong(h, GWL_EXSTYLE, new IntPtr(ex));
+            MakeTopmost(h);
         }
 
         private void HideTimer_Tick(object? sender, EventArgs e)
@@ -160,8 +171,7 @@ namespace DesktopKeyboard
                     if (this.Visibility != Visibility.Visible)
                         this.Visibility = Visibility.Visible;
 
-                    var helper = new WindowInteropHelper(this);
-                    SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    MakeTopmost(new WindowInteropHelper(this).Handle);
                     BringModeButtonToFront();
                 }
                 else if (this.Visibility == Visibility.Visible)
@@ -336,12 +346,6 @@ namespace DesktopKeyboard
             _modeButton.PreviewMouseLeftButtonDown += ModeButton_Down;
             _modeButton.PreviewMouseMove           += ModeButton_Move;
 
-            _modeBorder = new Border
-            {
-                CornerRadius = new CornerRadius(6),
-                Child = _modeButton
-            };
-
             _modeWindow = new Window
             {
                 WindowStyle = WindowStyle.None,
@@ -354,18 +358,13 @@ namespace DesktopKeyboard
                 Width = ModeBtnW,
                 Height = ModeBtnH,
                 Title = "Keyboard Toggle",
-                Content = _modeBorder
+                Content = new Border { CornerRadius = new CornerRadius(6), Child = _modeButton }
             };
 
             // Non-activating + tool window so it floats above everything and never
             // steals focus from the target app or shows in alt-tab.
             _modeWindow.SourceInitialized += (s, e) =>
-            {
-                var h = new WindowInteropHelper(_modeWindow).Handle;
-                SetWindowLong(h, GWL_EXSTYLE, new IntPtr(
-                    GetWindowLong(h, GWL_EXSTYLE).ToInt64() | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW));
-                SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            };
+                NoActivate(new WindowInteropHelper(_modeWindow).Handle, toolWindow: true);
 
             _modeWindow.Show();
 
@@ -401,7 +400,7 @@ namespace DesktopKeyboard
             // Defer so it runs after the keyboard's own show/topmost calls have settled.
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
             {
-                SetWindowPos(modeH, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                MakeTopmost(modeH);
                 if (kbH != IntPtr.Zero)
                     SetWindowPos(kbH, modeH, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             });
@@ -460,8 +459,7 @@ namespace DesktopKeyboard
                 case KeyboardMode.Show:
                     _hideTimer.Stop();
                     this.Visibility = Visibility.Visible;
-                    var helper = new WindowInteropHelper(this);
-                    SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    MakeTopmost(new WindowInteropHelper(this).Handle);
                     RepositionModeButton();
                     BringModeButtonToFront();
                     break;
@@ -733,8 +731,8 @@ namespace DesktopKeyboard
 
                 byte vk = GetVirtualKeyCode(tag);
 
-                // Fn remaps the number row (1-0, -, =) to F1-F12 while active.
-                if (fnState != ModState.Off && FnKey(tag) is byte fk) vk = fk;
+                // Fn remaps the number row to F1-F12 (and Backspace to Delete) while active.
+                if (fnState != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
 
                 if (vk != 0)
                 {
@@ -808,14 +806,26 @@ namespace DesktopKeyboard
             if (fnState    == ModState.OneShot) SetModState("TOGGLE_FN",    ModState.Off);
         }
 
-        // number-row tag -> function-key VK while Fn is active (1->F1 ... 0->F10, - ->F11, = ->F12)
-        private static byte? FnKey(string tag) => tag switch
+        // Printable punctuation keys: tag -> (virtual-key, normal label, shifted label).
+        private static readonly Dictionary<string, (byte Vk, string Normal, string Shifted)> Punct = new()
         {
-            "1" => 0x70, "2" => 0x71, "3" => 0x72, "4" => 0x73, "5" => 0x74,
-            "6" => 0x75, "7" => 0x76, "8" => 0x77, "9" => 0x78, "0" => 0x79,
-            "MINUS" => 0x7A, "EQUALS" => 0x7B,
-            "BACK" => 0x2E,   // Fn turns Backspace into Delete
-            _ => null,
+            ["COMMA"]     = (0xBC, ",",  "<"),
+            ["PERIOD"]    = (0xBE, ".",  ">"),
+            ["SLASH"]     = (0xBF, "/",  "?"),
+            ["GRAVE"]     = (0xC0, "`",  "~"),
+            ["MINUS"]     = (0xBD, "-",  "_"),
+            ["EQUALS"]    = (0xBB, "=",  "+"),
+            ["BACKSLASH"] = (0xDC, "\\", "|"),
+        };
+
+        // While Fn is active: number row -> F1-F12, and Backspace -> Delete.
+        private static readonly Dictionary<string, (byte Vk, string Label)> FnMap = new()
+        {
+            ["1"] = (0x70, "F1"),  ["2"] = (0x71, "F2"),  ["3"] = (0x72, "F3"),
+            ["4"] = (0x73, "F4"),  ["5"] = (0x74, "F5"),  ["6"] = (0x75, "F6"),
+            ["7"] = (0x76, "F7"),  ["8"] = (0x77, "F8"),  ["9"] = (0x78, "F9"),
+            ["0"] = (0x79, "F10"), ["MINUS"] = (0x7A, "F11"), ["EQUALS"] = (0x7B, "F12"),
+            ["BACK"] = (0x2E, "Del"),
         };
 
         // --- Long-press detection (locks a modifier) -------------------------
@@ -887,27 +897,16 @@ namespace DesktopKeyboard
                     string tag = btn.Tag.ToString() ?? "";
 
                     if (tag == "BACK")
-                    {
-                        // Backspace by default; Fn turns it into Delete.
-                        btn.Content = isFn ? "Del" : "⌫";
-                    }
-                    else if (isFn && FnLabel(tag) is string fl)
-                    {
-                        btn.Content = fl;
-                    }
+                        btn.Content = isFn ? "Del" : "⌫";   // Fn turns Backspace into Delete
+                    else if (isFn && FnMap.TryGetValue(tag, out var fm))
+                        btn.Content = fm.Label;
                     else if (tag.Length == 1 && char.IsLetter(tag[0]))
-                    {
                         btn.Content = isShifted ? tag.ToUpper() : tag.ToLower();
-                    }
                     else if (tag.Length == 1 && char.IsDigit(tag[0]))
-                    {
                         btn.Content = isShifted ? GetShiftedNumber(tag[0]) : tag;
-                    }
-                    else if (tag is "COMMA" or "PERIOD" or "SLASH" or "GRAVE" or "MINUS" or "EQUALS" or "BACKSLASH")
-                    {
-                        btn.Content = isShifted ? GetShiftedSymbol(tag) : GetNormalSymbol(tag);
-                    }
-                    // all other tags (BACK, ENTER, SPACE, arrows, toggles, F-keys, nav, numpad): leave content as-is
+                    else if (Punct.TryGetValue(tag, out var p))
+                        btn.Content = isShifted ? p.Shifted : p.Normal;
+                    // other tags (ENTER, SPACE, arrows, toggles, nav, numpad): leave content as-is
                 }
                 else if (child is DependencyObject depObj)
                 {
@@ -915,15 +914,6 @@ namespace DesktopKeyboard
                 }
             }
         }
-
-        // number-row label while Fn is active (matches FnKey)
-        private static string? FnLabel(string tag) => tag switch
-        {
-            "1" => "F1", "2" => "F2", "3" => "F3", "4" => "F4", "5" => "F5",
-            "6" => "F6", "7" => "F7", "8" => "F8", "9" => "F9", "0" => "F10",
-            "MINUS" => "F11", "EQUALS" => "F12",
-            _ => null,
-        };
 
         private string GetShiftedNumber(char c)
         {
@@ -943,36 +933,6 @@ namespace DesktopKeyboard
             };
         }
 
-        private string GetShiftedSymbol(string tag)
-        {
-            return tag switch
-            {
-                "COMMA" => "<",
-                "PERIOD" => ">",
-                "SLASH" => "?",
-                "GRAVE" => "~",
-                "MINUS" => "_",
-                "EQUALS" => "+",
-                "BACKSLASH" => "|",
-                _ => tag
-            };
-        }
-
-        private string GetNormalSymbol(string tag)
-        {
-            return tag switch
-            {
-                "COMMA" => ",",
-                "PERIOD" => ".",
-                "SLASH" => "/",
-                "GRAVE" => "`",
-                "MINUS" => "-",
-                "EQUALS" => "=",
-                "BACKSLASH" => "\\",
-                _ => tag
-            };
-        }
-
         private byte GetVirtualKeyCode(string keyTag)
         {
             if (keyTag.Length == 1)
@@ -982,6 +942,8 @@ namespace DesktopKeyboard
                     return (byte)c;
             }
 
+            if (Punct.TryGetValue(keyTag, out var p)) return p.Vk;
+
             return keyTag switch
             {
                 "BACK" => 0x08,
@@ -989,13 +951,6 @@ namespace DesktopKeyboard
                 "ENTER" => 0x0D,
                 "ESC" => 0x1B,
                 "SPACE" => 0x20,
-                "COMMA" => 0xBC,
-                "PERIOD" => 0xBE,
-                "SLASH" => 0xBF,
-                "GRAVE" => 0xC0,
-                "MINUS" => 0xBD,
-                "EQUALS" => 0xBB,
-                "BACKSLASH" => 0xDC,
 
                 "LEFT" => 0x25,
                 "UP" => 0x26,
