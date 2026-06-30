@@ -21,6 +21,13 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+
+    <!-- Framework feature switches: drop machinery this app never uses to trim metadata
+         and working set. Use terse (non-localized) framework exception strings, and disable
+         EventSource/ETW and HTTP activity propagation. -->
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <EventSourceSupport>false</EventSourceSupport>
+    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
   </PropertyGroup>
 
   <ItemGroup>

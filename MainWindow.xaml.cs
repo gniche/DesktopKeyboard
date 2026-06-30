@@ -118,16 +118,22 @@ namespace DesktopKeyboard
         private POINT _modeDragStart;
         private POINT _modeDragLast;
 
+        private IntPtr _hwnd;                    // cached window handle (set in OnSourceInitialized)
         private bool runOnStartup = false;
         private bool _loading = false;          // suppresses SaveSettings while applying loaded values
         private bool _settingsLoaded = false;   // blocks SaveSettings until the initial load finishes
-        private DateTime _suppressHideUntil = DateTime.MinValue; // keeps keyboard up after Esc moves focus
+        private long _suppressHideUntil = 0;    // TickCount64 until which Esc keeps the keyboard up
 
         private const string SettingsKey = @"Software\serifpersia\DesktopKeyboard";
         private const string RunKey      = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValue    = "DesktopKeyboard";
 
         private readonly DispatcherTimer _hideTimer;
+
+        // Coalesces registry writes: sliders fire ValueChanged continuously, so SaveSettings
+        // only arms this timer and the actual write happens once after the changes settle.
+        private readonly DispatcherTimer _saveTimer =
+            new() { Interval = TimeSpan.FromMilliseconds(400) };
 
         // Every tagged button, indexed by Tag, built once after InitializeComponent. Lets the
         // modifier/label updates touch keys directly instead of re-walking the logical tree on
@@ -141,6 +147,8 @@ namespace DesktopKeyboard
 
             _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _hideTimer.Tick += HideTimer_Tick;
+
+            _saveTimer.Tick += (s, e) => { _saveTimer.Stop(); SaveSettingsNow(); };
 
             BuildButtonCache(this);
             _longPressTimer.Tick += LongPress_Tick;
@@ -163,7 +171,15 @@ namespace DesktopKeyboard
         protected override void OnSourceInitialized(EventArgs e)
         {
             base.OnSourceInitialized(e);
-            NoActivate(new WindowInteropHelper(this).Handle);
+            _hwnd = new WindowInteropHelper(this).Handle;   // cache; reused for topmost calls
+            NoActivate(_hwnd);
+        }
+
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            // Flush any debounced settings write before exiting (Close raises this on shutdown).
+            if (_saveTimer.IsEnabled) { _saveTimer.Stop(); SaveSettingsNow(); }
+            base.OnClosing(e);
         }
 
         private static void MakeTopmost(IntPtr h) =>
@@ -183,7 +199,7 @@ namespace DesktopKeyboard
         {
             _hideTimer.Stop();
             if (currentMode != KeyboardMode.Auto) return;
-            if (DateTime.Now < _suppressHideUntil) return;
+            if (Environment.TickCount64 < _suppressHideUntil) return;
             if (this.Visibility == Visibility.Visible)
             {
                 this.Visibility = Visibility.Collapsed;
@@ -235,7 +251,7 @@ namespace DesktopKeyboard
                 if (this.Visibility != Visibility.Visible)
                 {
                     this.Visibility = Visibility.Visible;
-                    MakeTopmost(new WindowInteropHelper(this).Handle);
+                    MakeTopmost(_hwnd);
                     BringModeButtonToFront();
                 }
             }
@@ -243,7 +259,7 @@ namespace DesktopKeyboard
             {
                 // Esc often moves focus off the text field; keep the keyboard up for a
                 // short window so combos like Ctrl+Alt+Esc don't dismiss it.
-                if (DateTime.Now < _suppressHideUntil)
+                if (Environment.TickCount64 < _suppressHideUntil)
                     return;
                 _hideTimer.Start();
             }
@@ -461,7 +477,7 @@ namespace DesktopKeyboard
         {
             if (_modeWindow == null) return;
             var modeH = new WindowInteropHelper(_modeWindow).Handle;
-            var kbH   = new WindowInteropHelper(this).Handle;
+            var kbH   = _hwnd;
             if (modeH == IntPtr.Zero) return;
 
             // Defer so it runs after the keyboard's own show/topmost calls have settled.
@@ -526,7 +542,7 @@ namespace DesktopKeyboard
                 case KeyboardMode.Show:
                     _hideTimer.Stop();
                     this.Visibility = Visibility.Visible;
-                    MakeTopmost(new WindowInteropHelper(this).Handle);
+                    MakeTopmost(_hwnd);
                     RepositionModeButton();
                     BringModeButtonToFront();
                     break;
@@ -671,12 +687,21 @@ namespace DesktopKeyboard
 
         // --- Settings persistence (registry) ---------------------------------
 
+        // Debounced entry point: callers (incl. continuous slider ValueChanged) arm a short
+        // timer instead of writing the registry immediately, so a drag collapses to one write.
         private void SaveSettings()
         {
             // Skip while applying loaded values, and skip the spurious ValueChanged events
             // raised during InitializeComponent (before settings have been loaded) so they
             // can't clobber the saved registry values with defaults.
             if (_loading || !_settingsLoaded) return;
+            _saveTimer.Stop();
+            _saveTimer.Start();
+        }
+
+        private void SaveSettingsNow()
+        {
+            if (!_settingsLoaded) return;
             try
             {
                 var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -800,7 +825,7 @@ namespace DesktopKeyboard
                     // Don't let Esc's focus change auto-hide the keyboard. Esc can fire
                     // several focus events (e.g. closing a dialog then refocusing), so
                     // suppress hides for a short window rather than just the next one.
-                    _suppressHideUntil = DateTime.Now.AddMilliseconds(800);
+                    _suppressHideUntil = Environment.TickCount64 + 800;
                     _hideTimer.Stop();
                 }
 
