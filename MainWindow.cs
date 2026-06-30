@@ -64,6 +64,10 @@ public class MainWindow : Window
     private string? _longPressTag;
     private bool _longPressActive, _longPressFired;
 
+    // Auto-repeat for a held normal key (typematic): initial delay then fast repeat.
+    private readonly DispatcherTimer _repeatTimer = new();
+    private string? _repeatTag;
+
     // --- Mode (Auto/Show/Hide) + floating button -----------------------------
     private enum KeyboardMode { Auto, Show, Hide }
     private KeyboardMode currentMode = KeyboardMode.Auto;
@@ -135,6 +139,12 @@ public class MainWindow : Window
         _hideTimer.Tick += HideTimer_Tick;
         _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); SaveSettingsNow(); };
         _longPressTimer.Tick += LongPress_Tick;
+        _repeatTimer.Tick += (_, _) =>
+        {
+            if (_repeatTag == null) { _repeatTimer.Stop(); return; }
+            SendTag(_repeatTag);
+            _repeatTimer.Interval = TimeSpan.FromMilliseconds(45);   // fast repeat after the initial delay
+        };
 
         Dispatcher.UIThread.Post(() =>
         {
@@ -241,21 +251,16 @@ public class MainWindow : Window
 
     private Control BuildTopBar()
     {
-        // Centred row: [Esc] [mode] [toggle] [theme/layout/close]. Only the mode button and the
-        // toggle are persistent; Esc and the chrome group collapse behind the toggle (and when
-        // the keyboard hides), so the hidden strip is just mode + toggle. The window is anchored
-        // on the mode button's centre, so it never moves as things expand/collapse.
-        var bar = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Background = Brushes.Transparent,
-            Height = 44,
-            HorizontalAlignment = HorizontalAlignment.Center,
-        };
+        // Esc pinned top-left (shown only with the keyboard body); a centred cluster of
+        // [mode] [toggle] [theme/layout/close] overlaid in the same cell. Only mode + toggle
+        // are persistent, so the hidden strip is just those two. The window is anchored on the
+        // mode button's centre, so it never moves as things expand/collapse.
+        var bar = new Grid { Background = Brushes.Transparent, Height = 44, HorizontalAlignment = HorizontalAlignment.Stretch };
 
         _escKey = MakeKey("ESC", "Esc", 16);
+        _escKey.HorizontalAlignment = HorizontalAlignment.Left;
         _escKey.VerticalAlignment = VerticalAlignment.Center;
-        _escKey.Width = 60; _escKey.Height = 38; _escKey.Margin = new Thickness(2, 0, 2, 0);
+        _escKey.Width = 60; _escKey.Height = 38;
 
         var mode = BuildModeButton();
         mode.Margin = new Thickness(2, 0, 2, 0);
@@ -270,10 +275,18 @@ public class MainWindow : Window
         _chromeGroup.Children.Add(layoutBtn);
         _chromeGroup.Children.Add(closeBtn);
 
-        bar.Children.Add(_escKey);
-        bar.Children.Add(mode);
-        bar.Children.Add(toggle);
-        bar.Children.Add(_chromeGroup);
+        var cluster = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        cluster.Children.Add(mode);
+        cluster.Children.Add(toggle);
+        cluster.Children.Add(_chromeGroup);
+
+        bar.Children.Add(cluster);   // centred
+        bar.Children.Add(_escKey);   // left, overlaid
 
         _themePopup = new Popup
         {
@@ -477,26 +490,29 @@ public class MainWindow : Window
         _bodyVisible = currentMode == KeyboardMode.Show ||
                        (currentMode == KeyboardMode.Auto && _focusEditable);
         _bodyRow.IsVisible = _bodyVisible;
-        SetChromeExpanded(_bodyVisible);   // also re-anchors
+        _escKey.IsVisible = _bodyVisible;   // Esc shows only with the keys, pinned top-left
+        SetChromeExpanded(_bodyVisible);    // also re-anchors
     }
 
-    // Show/hide Esc + theme/layout/close, then re-anchor.
+    // Show/hide theme/layout/close (the toggle group), then re-anchor.
     private void SetChromeExpanded(bool on)
     {
         _chromeExpanded = on;
-        if (_escKey != null) _escKey.IsVisible = on;
         if (_chromeGroup != null) _chromeGroup.IsVisible = on;
         if (!on) _themePopup.IsOpen = false;
         AnchorToMode();
     }
 
     // Shift the window so the mode-button centre sits at _modeAnchor (after layout settles).
+    // Coalesced: several layout-changing calls in a row produce a single reposition (no flicker).
+    private bool _anchorPending;
     private void AnchorToMode()
     {
-        if (!_opened) return;
-        MakeTopmost(_hwnd);
+        if (!_opened || _anchorPending) return;
+        _anchorPending = true;
         Dispatcher.UIThread.Post(() =>
         {
+            _anchorPending = false;
             var b = _modeBg.Bounds;
             if (b.Width > 0)
             {
@@ -517,6 +533,8 @@ public class MainWindow : Window
     protected override void OnClosing(WindowClosingEventArgs e)
     {
         if (_saveTimer.IsEnabled) { _saveTimer.Stop(); SaveSettingsNow(); }
+        // Release any physically-held locked modifiers so they don't stick after exit.
+        foreach (var t in ModTags) if (_mod[t] == ModState.Locked) SetModState(t, ModState.Off);
         base.OnClosing(e);
     }
 
@@ -930,32 +948,36 @@ public class MainWindow : Window
     }
 
     // --- Key input -----------------------------------------------------------
+    // Keys fire on press (responsive, and enables auto-repeat); modifiers toggle on release.
     private void OnKeyPressed(Key k)
     {
-        if (_mod.ContainsKey(k.KeyTag)) StartLongPress(k.KeyTag);
+        string tag = k.KeyTag;
+        if (tag == "ESC") { _suppressHideUntil = Environment.TickCount64 + 800; _hideTimer.Stop(); }
+
+        if (_mod.ContainsKey(tag)) { StartLongPress(tag); return; }
+
+        // Normal key: send now, then auto-repeat while held (so Backspace/Del clear quickly).
+        SendTag(tag);
+        _repeatTag = tag;
+        _repeatTimer.Interval = TimeSpan.FromMilliseconds(400);
+        _repeatTimer.Start();
     }
 
     private void OnKeyReleased(Key k)
     {
-        StopLongPress();
-        DoKeyAction(k.KeyTag);
-    }
-
-    private void DoKeyAction(string tag)
-    {
-        if (tag == "ESC")
-        {
-            _suppressHideUntil = Environment.TickCount64 + 800;
-            _hideTimer.Stop();
-        }
-
+        string tag = k.KeyTag;
         if (_mod.ContainsKey(tag))
         {
+            StopLongPress();
             if (_longPressFired && tag == _longPressTag) { _longPressFired = false; return; }
             SetModState(tag, _mod[tag] == ModState.Off ? ModState.OneShot : ModState.Off);
             return;
         }
+        if (_repeatTag == tag) { _repeatTimer.Stop(); _repeatTag = null; }
+    }
 
+    private void SendTag(string tag)
+    {
         byte vk = GetVirtualKeyCode(tag);
         if (_mod["TOGGLE_FN"] != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
         if (vk != 0) SendKey(vk);
@@ -967,12 +989,20 @@ public class MainWindow : Window
         ki = new KEYBDINPUT { wVk = vk, dwFlags = up ? KEYEVENTF_KEYUP : 0 },
     };
 
+    // Single key event (used to hold/release locked modifiers like a physically held key).
+    private void SendRaw(ushort vk, bool down)
+    {
+        _inputBuf[0] = KeyInput(vk, up: !down);
+        SendInput(1, _inputBuf, InputSize);
+    }
+
     private void SendKey(byte vk)
     {
-        bool ctrl = _mod["TOGGLE_CTRL"] != ModState.Off;
-        bool alt = _mod["TOGGLE_ALT"] != ModState.Off;
-        bool shift = _mod["TOGGLE_SHIFT"] != ModState.Off;
-        bool win = _mod["TOGGLE_WIN"] != ModState.Off;
+        // Only wrap ONE-SHOT modifiers here; locked ones are already physically held down.
+        bool ctrl = _mod["TOGGLE_CTRL"] == ModState.OneShot;
+        bool alt = _mod["TOGGLE_ALT"] == ModState.OneShot;
+        bool shift = _mod["TOGGLE_SHIFT"] == ModState.OneShot;
+        bool win = _mod["TOGGLE_WIN"] == ModState.OneShot;
 
         int n = 0;
         if (ctrl) _inputBuf[n++] = KeyInput(VK_LCONTROL, false);
@@ -991,10 +1021,25 @@ public class MainWindow : Window
     }
 
     // --- Modifier state ------------------------------------------------------
+    private static readonly Dictionary<string, ushort> ModVk = new()
+    {
+        ["TOGGLE_SHIFT"] = VK_LSHIFT, ["TOGGLE_CTRL"] = VK_LCONTROL,
+        ["TOGGLE_ALT"] = VK_LMENU, ["TOGGLE_WIN"] = VK_LWIN,   // Fn is local-only (no real key)
+    };
+
     private void SetModState(string tag, ModState state, bool updateLabels = true)
     {
         if (!_mod.ContainsKey(tag)) return;
+        ModState old = _mod[tag];
         _mod[tag] = state;
+
+        // Locked behaves like physically holding the key: press it down on lock, release on
+        // unlock. One-shot stays virtual (wrapped per-key in SendKey).
+        if (ModVk.TryGetValue(tag, out var vk))
+        {
+            if (state == ModState.Locked && old != ModState.Locked) SendRaw(vk, down: true);
+            else if (old == ModState.Locked && state != ModState.Locked) SendRaw(vk, down: false);
+        }
 
         if (_byTag.TryGetValue(tag, out var keys))
         {
