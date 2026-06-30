@@ -28,6 +28,11 @@ namespace DesktopKeyboard
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
         [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT lpPoint);
 
+        // Returns the startup/idle working set to the OS (pages fault back in on demand).
+        [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+        [DllImport("psapi.dll")]    static extern int EmptyWorkingSet(IntPtr hProcess);
+        private static void TrimWorkingSet() { try { EmptyWorkingSet(GetCurrentProcess()); } catch { } }
+
         // SendInput supersedes keybd_event and delivers the whole batch atomically in one
         // syscall, so a key + its modifiers can't be interleaved with real user input.
         [DllImport("user32.dll", SetLastError = true)]
@@ -174,7 +179,12 @@ namespace DesktopKeyboard
 
             // Defer UIA registration until after the window is shown — initializing
             // the UIA COM infrastructure on the UI thread blocks startup for several seconds.
-            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, RegisterFocusTracking);
+            // Then trim the startup working set back to the OS now that init has settled.
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
+            {
+                RegisterFocusTracking();
+                TrimWorkingSet();
+            });
         }
 
         protected override void OnSourceInitialized(EventArgs e)
@@ -379,6 +389,7 @@ namespace DesktopKeyboard
             currentLayoutState = state;
             bool full = state == 1;
 
+            if (full) BuildNumpad();   // realise the numpad's keys on first use only
             NumpadCol.Width       = full ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
             NumpadGrid.Visibility = full ? Visibility.Visible : Visibility.Collapsed;
 
@@ -389,6 +400,39 @@ namespace DesktopKeyboard
             // Suppress per-state relabeling and do a single UpdateKeys pass afterwards.
             foreach (var t in ModTags) SetModState(t, ModState.Off, updateLabels: false);
             UpdateKeys();
+        }
+
+        private bool _numpadBuilt;
+
+        // Numpad keys, created on first switch to Full so Base layout never holds their tree.
+        // (content, tag, row, col, rowSpan, colSpan, fontSize; fontSize 0 = inherit KeyStyle's 22)
+        private static readonly (string C, string Tag, int R, int Col, int RS, int CS, double FS)[] NumpadKeys =
+        {
+            ("NLk","NUMLK",0,0,1,1,14), ("/","NUMSLASH",0,1,1,1,18), ("*","NUMSTAR",0,2,1,1,18), ("-","NUMMINUS",0,3,1,1,18),
+            ("7","NUM7",1,0,1,1,0), ("8","NUM8",1,1,1,1,0), ("9","NUM9",1,2,1,1,0), ("+","NUMPLUS",1,3,2,1,18),
+            ("4","NUM4",2,0,1,1,0), ("5","NUM5",2,1,1,1,0), ("6","NUM6",2,2,1,1,0),
+            ("1","NUM1",3,0,1,1,0), ("2","NUM2",3,1,1,1,0), ("3","NUM3",3,2,1,1,0), ("↵","ENTER",3,3,2,1,20),
+            ("0","NUM0",4,0,1,2,0), (".","NUMDOT",4,2,1,1,18),
+        };
+
+        private void BuildNumpad()
+        {
+            if (_numpadBuilt) return;
+            _numpadBuilt = true;
+
+            foreach (var k in NumpadKeys)
+            {
+                // No explicit Style: the implicit KeyStyle in the keyboard grid's resources
+                // applies to Buttons added anywhere in that subtree, including here.
+                var b = new Button { Content = k.C, Tag = k.Tag };
+                if (k.FS > 0) b.FontSize = k.FS;
+                b.Click += Key_Click;
+                Grid.SetRow(b, k.R);
+                Grid.SetColumn(b, k.Col);
+                if (k.RS > 1) Grid.SetRowSpan(b, k.RS);
+                if (k.CS > 1) Grid.SetColumnSpan(b, k.CS);
+                NumpadGrid.Children.Add(b);
+            }
         }
 
         // --- Hue / Opacity theming -------------------------------------------
@@ -560,6 +604,7 @@ namespace DesktopKeyboard
                     _hideTimer.Stop();
                     this.Visibility = Visibility.Collapsed;
                     ThemePopup.IsOpen = false;
+                    TrimWorkingSet();
                     break;
 
                 case KeyboardMode.Auto:

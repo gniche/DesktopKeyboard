@@ -24,34 +24,26 @@
                                  the touch "stuck highlight" since it doesn't depend on IsMouseOver. -->
                             <Border x:Name="PressHighlight" Background="#40FFFFFF" CornerRadius="6" Opacity="0"/>
                             <!-- Black outline keeps white glyphs readable even when keys are translucent.
-                                 Four 1px-offset black copies of the glyph form the outline. This is pure
-                                 text drawing with NO pixel-shader Effect: a BlurEffect/DropShadowEffect
-                                 here forces an offscreen render pass per key, re-rasterized under the
-                                 Viewbox scale on every press-animation frame — the cause of high CPU.
-                                 The whole glyph (outline + white top) is BitmapCache'd so a press-fade
-                                 frame composites a cached bitmap instead of re-rasterizing 5 text layers;
-                                 RenderAtScale=2 keeps it crisp through the Viewbox at every size preset.
-                                 It re-rasterizes only when the label changes (Shift/Fn), which is rare. -->
-                            <Grid>
-                                <Grid.CacheMode>
-                                    <BitmapCache RenderAtScale="1.5"/>
-                                </Grid.CacheMode>
-                                <Grid Margin="0,0,0,3" TextElement.Foreground="Black">
-                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                        <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="-1"/></ContentPresenter.RenderTransform>
-                                    </ContentPresenter>
-                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                        <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="-1"/></ContentPresenter.RenderTransform>
-                                    </ContentPresenter>
-                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                        <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="1"/></ContentPresenter.RenderTransform>
-                                    </ContentPresenter>
-                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                        <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="1"/></ContentPresenter.RenderTransform>
-                                    </ContentPresenter>
-                                </Grid>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
+                                 Four 1px-offset black copies of the glyph form the outline. Pure text
+                                 drawing with NO pixel-shader Effect (a Blur/DropShadow would force an
+                                 offscreen pass per key). No BitmapCache either: profiling showed the
+                                 per-press cost is the layered-window blit, not text rasterization, so the
+                                 cache only cost memory for no CPU benefit. -->
+                            <Grid Margin="0,0,0,3" TextElement.Foreground="Black">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="-1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="-1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="1"/></ContentPresenter.RenderTransform>
+                                </ContentPresenter>
                             </Grid>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsPressed" Value="True">
@@ -307,7 +299,8 @@
                         </Grid>
                     </Grid>
 
-                    <!-- Numpad (shown for Full) -->
+                    <!-- Numpad (shown for Full). Keys are built in code on first switch to Full
+                         (see BuildNumpad) so the Base layout never pays their tree memory. -->
                     <Grid x:Name="NumpadGrid" Grid.Column="1" Margin="4,0,0,0" Visibility="Collapsed">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*"/><RowDefinition Height="*"/><RowDefinition Height="*"/>
@@ -317,23 +310,6 @@
                             <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <Button Grid.Row="0" Grid.Column="0" Content="NLk" Tag="NUMLK"   Click="Key_Click" FontSize="14"/>
-                        <Button Grid.Row="0" Grid.Column="1" Content="/"   Tag="NUMSLASH" Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="0" Grid.Column="2" Content="*"   Tag="NUMSTAR"  Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="0" Grid.Column="3" Content="-"   Tag="NUMMINUS" Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="1" Grid.Column="0" Content="7"   Tag="NUM7"     Click="Key_Click"/>
-                        <Button Grid.Row="1" Grid.Column="1" Content="8"   Tag="NUM8"     Click="Key_Click"/>
-                        <Button Grid.Row="1" Grid.Column="2" Content="9"   Tag="NUM9"     Click="Key_Click"/>
-                        <Button Grid.Row="1" Grid.Column="3" Grid.RowSpan="2" Content="+" Tag="NUMPLUS" Click="Key_Click" FontSize="18"/>
-                        <Button Grid.Row="2" Grid.Column="0" Content="4"   Tag="NUM4"     Click="Key_Click"/>
-                        <Button Grid.Row="2" Grid.Column="1" Content="5"   Tag="NUM5"     Click="Key_Click"/>
-                        <Button Grid.Row="2" Grid.Column="2" Content="6"   Tag="NUM6"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="0" Content="1"   Tag="NUM1"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="1" Content="2"   Tag="NUM2"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="2" Content="3"   Tag="NUM3"     Click="Key_Click"/>
-                        <Button Grid.Row="3" Grid.Column="3" Grid.RowSpan="2" Content="↵" Tag="ENTER" Click="Key_Click" FontSize="20"/>
-                        <Button Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Content="0" Tag="NUM0" Click="Key_Click"/>
-                        <Button Grid.Row="4" Grid.Column="2" Content="."   Tag="NUMDOT"   Click="Key_Click" FontSize="18"/>
                     </Grid>
                 </Grid>
 
