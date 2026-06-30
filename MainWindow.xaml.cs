@@ -943,21 +943,28 @@ namespace DesktopKeyboard
                     btn.Content = isFn ? "Del" : "⌫";   // Fn turns Backspace into Delete
                 else if (isFn && FnMap.TryGetValue(tag, out var fm))
                     btn.Content = fm.Label;
-                else if (tag.Length == 1 && char.IsLetter(tag[0]))
-                    btn.Content = isShifted ? tag.ToUpper() : tag.ToLower();
-                else if (tag.Length == 1 && char.IsDigit(tag[0]))
-                    btn.Content = isShifted ? GetShiftedNumber(tag[0]) : tag;
+                else if (tag.Length == 1 && tag[0] is >= 'A' and <= 'Z')
+                    // Tag is the uppercase letter, so shifted reuses it; lowercase is cached.
+                    btn.Content = isShifted ? tag : LowerLetter[tag[0] - 'A'];
+                else if (tag.Length == 1 && tag[0] is >= '0' and <= '9')
+                    // Tag is the digit, so unshifted reuses it; shifted symbol is cached.
+                    btn.Content = isShifted ? ShiftedDigit[tag[0] - '0'] : tag;
                 else if (Punct.TryGetValue(tag, out var p))
                     btn.Content = isShifted ? p.Shifted : p.Normal;
                 // other tags (ENTER, SPACE, arrows, toggles, nav, numpad): leave content as-is
             }
         }
 
-        private static string GetShiftedNumber(char c)
+        // Cached single-char label strings so UpdateKeys allocates nothing per Shift toggle.
+        private static readonly string[] LowerLetter = BuildLowerLetters();
+        private static readonly string[] ShiftedDigit =   // index = digit value 0-9
+            { ")", "!", "@", "#", "$", "%", "^", "&", "*", "(" };
+
+        private static string[] BuildLowerLetters()
         {
-            const string digits = "1234567890", shifted = "!@#$%^&*()";
-            int i = digits.IndexOf(c);
-            return i >= 0 ? shifted[i].ToString() : c.ToString();
+            var a = new string[26];
+            for (int i = 0; i < 26; i++) a[i] = ((char)('a' + i)).ToString();
+            return a;
         }
 
         private static byte GetVirtualKeyCode(string keyTag)
