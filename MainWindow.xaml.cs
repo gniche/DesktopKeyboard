@@ -26,6 +26,10 @@ namespace DesktopKeyboard
         [DllImport("user32.dll")] public static extern IntPtr GetWindowLong(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT lpPoint);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X; public int Y; }
 
         private const uint KEYEVENTF_KEYUP = 0x0002;
         private const byte VK_LSHIFT   = 0xA0;
@@ -74,6 +78,12 @@ namespace DesktopKeyboard
         private Window? _modeWindow;
         private Button? _modeButton;
         private TextBlock? _modeText;
+        private Border? _modeBorder;
+        private const double ModeBtnW = 96;
+        private const double ModeBtnH = 32;
+        private bool _modeDragging;
+        private POINT _modeDragStart;
+        private POINT _modeDragLast;
 
         private bool runOnStartup = false;
         private bool _loading = false;          // suppresses SaveSettings while applying loaded values
@@ -171,6 +181,7 @@ namespace DesktopKeyboard
 
                     var helper = new WindowInteropHelper(this);
                     SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    BringModeButtonToFront();
                 }
                 else if (!isManuallyHidden && this.Visibility == Visibility.Visible)
                 {
@@ -298,6 +309,7 @@ namespace DesktopKeyboard
                 case 1: this.Width = 850;  this.Height = 360; break;
                 case 2: this.Width = 1200; this.Height = 508; break;
             }
+            RepositionModeButton();
             if (SizeLabel != null)
                 SizeLabel.Text = "Size: " + currentSizeState switch
                 {
@@ -340,11 +352,17 @@ namespace DesktopKeyboard
         {
             if (_modeWindow != null) return;
 
-            // White label with a black halo so it stays readable at 50% opacity.
+            // Give the keyboard a sensible default position (bottom-centre of the work
+            // area) so the mode button has a place to sit even before the keyboard shows.
+            var wa = SystemParameters.WorkArea;
+            this.Left = wa.Left + (wa.Width - this.Width) / 2;
+            this.Top  = wa.Bottom - this.Height - 40;
+
+            // White label with a black halo so it stays readable on a translucent key.
             _modeText = new TextBlock
             {
                 Text = "Auto",
-                FontSize = 14,
+                FontSize = 15,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = Brushes.White,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -352,40 +370,28 @@ namespace DesktopKeyboard
                 Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 4, ShadowDepth = 0, Opacity = 1 }
             };
 
+            // Styled like a keyboard key (themed grey, set by ApplyTheme).
             _modeButton = new Button
             {
                 Content = _modeText,
-                Width = 64,
-                Height = 40,
+                Width = ModeBtnW,
+                Height = ModeBtnH,
                 Focusable = false,
+                Background = new SolidColorBrush(Color.FromRgb(37, 37, 37)),
                 BorderThickness = new Thickness(0),
                 Cursor = Cursors.Hand
             };
-            _modeButton.Click += (s, e) => CycleMode();
 
-            var grip = new TextBlock
+            // Click cycles the mode; a drag moves the keyboard (the button is the handle
+            // that stays visible when the keyboard is hidden).
+            _modeButton.PreviewMouseLeftButtonDown += ModeButton_Down;
+            _modeButton.PreviewMouseMove           += ModeButton_Move;
+            _modeButton.PreviewMouseLeftButtonUp   += ModeButton_Up;
+
+            _modeBorder = new Border
             {
-                Text = "⠿",
-                FontSize = 18,
-                Foreground = Brushes.White,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 0, 4, 0),
-                Cursor = Cursors.SizeAll,
-                Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 4, ShadowDepth = 0, Opacity = 1 }
-            };
-
-            var panel = new StackPanel { Orientation = Orientation.Horizontal };
-            panel.Children.Add(grip);
-            panel.Children.Add(_modeButton);
-
-            // 50% opacity on the body; the text/grip keep full opacity via their halo.
-            var border = new Border
-            {
-                Background = new SolidColorBrush(Color.FromRgb(34, 34, 34)) { Opacity = 0.5 },
-                CornerRadius = new CornerRadius(8),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(74, 144, 226)) { Opacity = 0.5 },
-                BorderThickness = new Thickness(2),
-                Child = panel
+                CornerRadius = new CornerRadius(6),
+                Child = _modeButton
             };
 
             _modeWindow = new Window
@@ -397,17 +403,10 @@ namespace DesktopKeyboard
                 ShowActivated = false,
                 ShowInTaskbar = false,
                 ResizeMode = ResizeMode.NoResize,
-                SizeToContent = SizeToContent.WidthAndHeight,
+                Width = ModeBtnW,
+                Height = ModeBtnH,
                 Title = "Keyboard Toggle",
-                Content = border,
-                Left = 40,
-                Top = 40
-            };
-
-            // Drag the floating button anywhere via its grip handle.
-            grip.MouseLeftButtonDown += (s, e) =>
-            {
-                try { _modeWindow?.DragMove(); } catch { }
+                Content = _modeBorder
             };
 
             // Non-activating + tool window so it floats above everything and never
@@ -421,7 +420,65 @@ namespace DesktopKeyboard
             };
 
             _modeWindow.Show();
+
+            // Keep the button glued to the keyboard's top-centre as it moves/resizes.
+            this.LocationChanged += (s, e) => RepositionModeButton();
+            this.SizeChanged     += (s, e) => RepositionModeButton();
+
+            RepositionModeButton();
+            ApplyTheme();          // theme the mode button to match the keys
             UpdateModeButton();
+        }
+
+        // Places the mode button centred on the keyboard's top bar. Uses this.Width
+        // (the set value) rather than ActualWidth so it works while the keyboard is
+        // hidden/collapsed too.
+        private void RepositionModeButton()
+        {
+            if (_modeWindow == null) return;
+            _modeWindow.Left = this.Left + (this.Width / 2) - (ModeBtnW / 2);
+            _modeWindow.Top  = this.Top + 4;
+        }
+
+        // Keep the mode button drawn above the keyboard when the keyboard (re)appears.
+        private void BringModeButtonToFront()
+        {
+            if (_modeWindow == null) return;
+            var h = new WindowInteropHelper(_modeWindow).Handle;
+            if (h != IntPtr.Zero) SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        }
+
+        private void ModeButton_Down(object sender, MouseButtonEventArgs e)
+        {
+            GetCursorPos(out _modeDragStart);
+            _modeDragLast = _modeDragStart;
+            _modeDragging = false;
+            _modeButton?.CaptureMouse();
+        }
+
+        private void ModeButton_Move(object sender, MouseEventArgs e)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed || _modeButton?.IsMouseCaptured != true) return;
+
+            GetCursorPos(out POINT cur);
+            if (!_modeDragging &&
+                (Math.Abs(cur.X - _modeDragStart.X) > 4 || Math.Abs(cur.Y - _modeDragStart.Y) > 4))
+                _modeDragging = true;
+
+            if (_modeDragging)
+            {
+                this.Left += cur.X - _modeDragLast.X;
+                this.Top  += cur.Y - _modeDragLast.Y;
+                _modeDragLast = cur;
+                RepositionModeButton();
+            }
+        }
+
+        private void ModeButton_Up(object sender, MouseButtonEventArgs e)
+        {
+            _modeButton?.ReleaseMouseCapture();
+            if (!_modeDragging) CycleMode();   // a tap (no drag) cycles the mode
+            _modeDragging = false;
         }
 
         private void CycleMode()
@@ -446,6 +503,8 @@ namespace DesktopKeyboard
                     this.Visibility = Visibility.Visible;
                     var helper = new WindowInteropHelper(this);
                     SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    RepositionModeButton();
+                    BringModeButtonToFront();
                     break;
 
                 case KeyboardMode.Hide:
@@ -464,17 +523,13 @@ namespace DesktopKeyboard
 
         private void UpdateModeButton()
         {
-            if (_modeButton == null) return;
-
-            (string text, Color color) = currentMode switch
-            {
-                KeyboardMode.Show => ("Show", Color.FromRgb(46, 160, 67)),   // green
-                KeyboardMode.Hide => ("Hide", Color.FromRgb(200, 60, 60)),   // red
-                _                 => ("Auto", Color.FromRgb(74, 144, 226)),  // blue
-            };
-
-            if (_modeText != null) _modeText.Text = text;
-            _modeButton.Background = new SolidColorBrush(color) { Opacity = 0.5 };
+            if (_modeText != null)
+                _modeText.Text = currentMode switch
+                {
+                    KeyboardMode.Show => "Show",
+                    KeyboardMode.Hide => "Hide",
+                    _                 => "Auto",
+                };
         }
 
         private void ThemeButton_Click(object sender, RoutedEventArgs e)
@@ -543,6 +598,10 @@ namespace DesktopKeyboard
             // by DynamicResource get frozen by WPF, and mutating a frozen brush throws.
             // Swapping the entry re-resolves every DynamicResource reference safely.
             Resources["KeyBg"] = new SolidColorBrush(keyColor) { Opacity = currentOpacity };
+
+            // Match the floating mode button to the keys.
+            if (_modeButton != null)
+                _modeButton.Background = new SolidColorBrush(keyColor) { Opacity = currentOpacity };
         }
 
         private static Color HsvToColor(double h, double s, double v)
@@ -797,6 +856,7 @@ namespace DesktopKeyboard
             "1" => 0x70, "2" => 0x71, "3" => 0x72, "4" => 0x73, "5" => 0x74,
             "6" => 0x75, "7" => 0x76, "8" => 0x77, "9" => 0x78, "0" => 0x79,
             "MINUS" => 0x7A, "EQUALS" => 0x7B,
+            "BACK" => 0x2E,   // Fn turns Backspace into Delete
             _ => null,
         };
 
@@ -868,7 +928,12 @@ namespace DesktopKeyboard
                 {
                     string tag = btn.Tag.ToString() ?? "";
 
-                    if (isFn && FnLabel(tag) is string fl)
+                    if (tag == "BACK")
+                    {
+                        // Backspace by default; Fn turns it into Delete.
+                        btn.Content = isFn ? "Del" : "⌫";
+                    }
+                    else if (isFn && FnLabel(tag) is string fl)
                     {
                         btn.Content = fl;
                     }
@@ -880,7 +945,7 @@ namespace DesktopKeyboard
                     {
                         btn.Content = isShifted ? GetShiftedNumber(tag[0]) : tag;
                     }
-                    else if (tag is "COMMA" or "PERIOD" or "SLASH" or "GRAVE" or "MINUS" or "EQUALS")
+                    else if (tag is "COMMA" or "PERIOD" or "SLASH" or "GRAVE" or "MINUS" or "EQUALS" or "BACKSLASH")
                     {
                         btn.Content = isShifted ? GetShiftedSymbol(tag) : GetNormalSymbol(tag);
                     }
@@ -930,6 +995,7 @@ namespace DesktopKeyboard
                 "GRAVE" => "~",
                 "MINUS" => "_",
                 "EQUALS" => "+",
+                "BACKSLASH" => "|",
                 _ => tag
             };
         }
@@ -944,6 +1010,7 @@ namespace DesktopKeyboard
                 "GRAVE" => "`",
                 "MINUS" => "-",
                 "EQUALS" => "=",
+                "BACKSLASH" => "\\",
                 _ => tag
             };
         }
@@ -970,6 +1037,7 @@ namespace DesktopKeyboard
                 "GRAVE" => 0xC0,
                 "MINUS" => 0xBD,
                 "EQUALS" => 0xBB,
+                "BACKSLASH" => 0xDC,
 
                 "LEFT" => 0x25,
                 "UP" => 0x26,
