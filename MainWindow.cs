@@ -79,11 +79,12 @@ public class MainWindow : Window
     private readonly IClassicDesktopStyleApplicationLifetime _desktop;
     private IntPtr _hwnd;
     private bool _opened;
-    private PixelPoint _kbPos;          // full-keyboard top-left in screen px
-    private bool _bodyVisible;          // are the keys shown (vs. just the mode button)
-    private Viewbox _viewbox = null!;
-    private double _presetW = 850, _presetH = 360;
+    private PixelPoint _kbPos;          // window top-left in screen px (anchor for show/hide/resize)
+    private bool _bodyVisible;          // are the keys shown (vs. just the top row)
     private bool _focusEditable;        // last UIA focus classification (Auto mode)
+    private StackPanel _bodyRow = null!;          // keyboard + numpad; collapses when hidden
+    private LayoutTransformControl _scaler = null!;
+    private readonly ScaleTransform _scale = new(1, 1);   // size preset -> key size; window fits via SizeToContent
 
     private bool runOnStartup, _loading, _settingsLoaded;
     private long _suppressHideUntil;
@@ -103,7 +104,6 @@ public class MainWindow : Window
 
     // --- UI references -------------------------------------------------------
     private Border _mainBorder = null!;
-    private ColumnDefinition _numpadCol = null!;
     private Grid _numpadGrid = null!;
     private Popup _themePopup = null!;
     private TouchSlider _hueSlider = null!, _brightnessSlider = null!, _opacitySlider = null!, _sizeSlider = null!;
@@ -125,7 +125,7 @@ public class MainWindow : Window
         ShowActivated = false;
         CanResize = false;
         WindowStartupLocation = WindowStartupLocation.Manual;
-        Width = 850; Height = 360;
+        SizeToContent = SizeToContent.WidthAndHeight;   // window fits the keyboard; grows for the numpad
 
         Content = BuildContent();
 
@@ -152,49 +152,36 @@ public class MainWindow : Window
     // --- UI construction -----------------------------------------------------
     private Control BuildContent()
     {
+        // Vertical: a persistent top row (Esc | mode button | theme/layout/close) over the
+        // collapsible body (keyboard + optional numpad). The window sizes to this content
+        // (SizeToContent), so the numpad grows the window instead of shrinking the keys, and
+        // "hidden" simply collapses the body leaving the top row (with the mode button) in place.
+        _numpadGrid = new Grid { Margin = new Thickness(4, 0, 0, 0), Width = 228, Height = 290, IsVisible = false };
+        for (int i = 0; i < 5; i++) _numpadGrid.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
+        for (int i = 0; i < 4; i++) _numpadGrid.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
+
+        _bodyRow = new StackPanel { Orientation = Orientation.Horizontal };
+        _bodyRow.Children.Add(BuildKeyboard());
+        _bodyRow.Children.Add(_numpadGrid);
+
+        var stack = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(8) };
+        stack.Children.Add(BuildTopBar());
+        stack.Children.Add(_bodyRow);
+
         _mainBorder = new Border
         {
-            Width = 850,
-            Height = 360,
             Background = new ImmutableSolidColorBrush(Color.FromRgb(0x11, 0x11, 0x11)),
             CornerRadius = new CornerRadius(8),
             BorderBrush = new ImmutableSolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
             BorderThickness = new Thickness(1),
+            Child = stack,
         };
 
-        var root = new Grid();
-        root.RowDefinitions.Add(new RowDefinition(45, GridUnitType.Pixel));
-        root.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
-        root.Children.Add(BuildTopBar());
-
-        var body = new Grid { Margin = new Thickness(10, 5, 10, 15) };
-        body.ColumnDefinitions.Add(new ColumnDefinition(3, GridUnitType.Star));
-        _numpadCol = new ColumnDefinition(0, GridUnitType.Pixel);
-        body.ColumnDefinitions.Add(_numpadCol);
-        Grid.SetRow(body, 1);
-
-        var keyboard = BuildKeyboard();
-        Grid.SetColumn(keyboard, 0);
-        body.Children.Add(keyboard);
-
-        _numpadGrid = new Grid { Margin = new Thickness(4, 0, 0, 0), IsVisible = false };
-        for (int i = 0; i < 5; i++) _numpadGrid.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
-        for (int i = 0; i < 4; i++) _numpadGrid.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
-        Grid.SetColumn(_numpadGrid, 1);
-        body.Children.Add(_numpadGrid);
-
-        root.Children.Add(body);
-        _mainBorder.Child = root;
-
-        // The keyboard scales in a Viewbox; the mode button overlays the top-centre as a
-        // sibling so it stays put when the keys are collapsed (window shrinks to just it).
-        _viewbox = new Viewbox { Stretch = Stretch.Uniform, Child = _mainBorder };
-        var outer = new Grid();
-        outer.Children.Add(_viewbox);
-        outer.Children.Add(BuildModeButton());
-        return outer;
+        _scaler = new LayoutTransformControl { LayoutTransform = _scale, Child = _mainBorder };
+        return _scaler;
     }
 
+    // Builds the mode button (a top-row cell). Tap cycles the mode; drag moves the window.
     private Control BuildModeButton()
     {
         _modeText = MakeModeLabel(Brushes.White, 0, 0);
@@ -214,9 +201,7 @@ public class MainWindow : Window
             Cursor = new Cursor(StandardCursorType.Hand),
             Width = ModeBtnW,
             Height = ModeBtnH,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(0, 4, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
             Child = labelGrid,
         };
 
@@ -253,15 +238,25 @@ public class MainWindow : Window
 
     private Control BuildTopBar()
     {
-        var bar = new Grid { Background = Brushes.Transparent };
-        Grid.SetRow(bar, 0);
+        // Columns: Esc | flexible | mode button | flexible | theme/layout/close. The flexible
+        // spacers centre the mode button when shown wide, and collapse to a compact strip when
+        // the body is hidden (so the persistent top row stays tidy).
+        var bar = new Grid { Background = Brushes.Transparent, Height = 44, HorizontalAlignment = HorizontalAlignment.Stretch };
+        bar.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
+        bar.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
+        bar.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
+        bar.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
+        bar.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
 
         var esc = MakeKey("ESC", "Esc", 16);
-        esc.HorizontalAlignment = HorizontalAlignment.Left;
         esc.VerticalAlignment = VerticalAlignment.Center;
         esc.Width = 60; esc.Height = 38;
-        esc.Margin = new Thickness(10, 3, 0, 0);
+        Grid.SetColumn(esc, 0);
         bar.Children.Add(esc);
+
+        var mode = BuildModeButton();
+        Grid.SetColumn(mode, 2);
+        bar.Children.Add(mode);
 
         var themeBtn = ChromeButton("🎨", 16, () => _themePopup.IsOpen = !_themePopup.IsOpen);
         var layoutBtn = ChromeButton("⌨", 16, () => { SetLayout((currentLayoutState + 1) % 2); SaveSettings(); });
@@ -270,13 +265,12 @@ public class MainWindow : Window
         var right = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 10, 0),
         };
         right.Children.Add(themeBtn);
         right.Children.Add(layoutBtn);
         right.Children.Add(closeBtn);
+        Grid.SetColumn(right, 4);
         bar.Children.Add(right);
 
         _themePopup = new Popup
@@ -394,50 +388,48 @@ public class MainWindow : Window
         return b;
     }
 
+    // Fixed key sizes (design units; scaled as a whole by the size preset). Rows share one
+    // width so they stay left-aligned; the window sizes to this content.
+    private const double KbW = 812, RowH = 58;
+
     private Control BuildKeyboard()
     {
-        var g = new Grid();
-        for (int i = 0; i < 5; i++) g.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
+        var col = new StackPanel { Orientation = Orientation.Vertical };
 
-        // Number row
-        var num = new UniformGrid { Columns = 14 };
+        var num = new UniformGrid { Columns = 14, Width = KbW, Height = RowH };
         AddTo(num, MakeKey("GRAVE", "`"), MakeKey("1", "1"), MakeKey("2", "2"), MakeKey("3", "3"),
             MakeKey("4", "4"), MakeKey("5", "5"), MakeKey("6", "6"), MakeKey("7", "7"), MakeKey("8", "8"),
             MakeKey("9", "9"), MakeKey("0", "0"), MakeKey("MINUS", "-"), MakeKey("EQUALS", "="), MakeKey("BACK", "⌫", 18));
-        Grid.SetRow(num, 0); g.Children.Add(num);
+        col.Children.Add(num);
 
-        var qwerty = Row(new[] { 1.3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.2 },
+        col.Children.Add(Row(new[] { 1.3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.2 },
             MakeKey("TAB", "⇥"), MakeKey("Q", "q"), MakeKey("W", "w"), MakeKey("E", "e"), MakeKey("R", "r"),
             MakeKey("T", "t"), MakeKey("Y", "y"), MakeKey("U", "u"), MakeKey("I", "i"), MakeKey("O", "o"),
-            MakeKey("P", "p"), MakeKey("BACKSLASH", "\\"));
-        Grid.SetRow(qwerty, 1); g.Children.Add(qwerty);
+            MakeKey("P", "p"), MakeKey("BACKSLASH", "\\")));
 
-        var home = Row(new[] { 1.3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.5 },
+        col.Children.Add(Row(new[] { 1.3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.5 },
             MakeKey("TOGGLE_FN", "Fn", 18), MakeKey("A", "a"), MakeKey("S", "s"), MakeKey("D", "d"), MakeKey("F", "f"),
             MakeKey("G", "g"), MakeKey("H", "h"), MakeKey("J", "j"), MakeKey("K", "k"), MakeKey("L", "l"),
-            MakeKey("ENTER", "↵"));
-        Grid.SetRow(home, 2); g.Children.Add(home);
+            MakeKey("ENTER", "↵")));
 
-        var shift = Row(new[] { 1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+        col.Children.Add(Row(new[] { 1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
             MakeKey("TOGGLE_SHIFT", "⇧", 26), MakeKey("Z", "z"), MakeKey("X", "x"), MakeKey("C", "c"), MakeKey("V", "v"),
             MakeKey("B", "b"), MakeKey("N", "n"), MakeKey("M", "m"), MakeKey("COMMA", ","), MakeKey("PERIOD", "."),
-            MakeKey("SLASH", "/"), MakeKey("UP", "↑", 26), MakeKey("PGUP", "PgUp", 15), MakeKey("PGDN", "PgDn", 15));
-        Grid.SetRow(shift, 3); g.Children.Add(shift);
+            MakeKey("SLASH", "/"), MakeKey("UP", "↑", 26), MakeKey("PGUP", "PgUp", 15), MakeKey("PGDN", "PgDn", 15)));
 
-        var bottom = Row(new[] { 1.5, 1.5, 1.5, 5, 1, 1, 1, 1, 1 },
+        col.Children.Add(Row(new[] { 1.5, 1.5, 1.5, 5, 1, 1, 1, 1, 1 },
             MakeKey("TOGGLE_CTRL", "Ctrl", 18), MakeKey("TOGGLE_WIN", "⊞", 20), MakeKey("TOGGLE_ALT", "Alt", 18),
             MakeKey("SPACE", "Space", 18), MakeKey("LEFT", "←", 22), MakeKey("DOWN", "↓", 22), MakeKey("RIGHT", "→", 22),
-            MakeKey("HOME", "Home", 15), MakeKey("END", "End", 15));
-        Grid.SetRow(bottom, 4); g.Children.Add(bottom);
+            MakeKey("HOME", "Home", 15), MakeKey("END", "End", 15)));
 
-        return g;
+        return col;
     }
 
     private static void AddTo(Panel p, params Control[] items) { foreach (var i in items) p.Children.Add(i); }
 
     private static Grid Row(double[] widths, params Key[] keys)
     {
-        var g = new Grid();
+        var g = new Grid { Width = KbW, Height = RowH };
         foreach (var w in widths) g.ColumnDefinitions.Add(new ColumnDefinition(w, GridUnitType.Star));
         for (int i = 0; i < keys.Length; i++) { Grid.SetColumn(keys[i], i); g.Children.Add(keys[i]); }
         return g;
@@ -467,42 +459,34 @@ public class MainWindow : Window
     // Default keyboard position: bottom-centre of the work area (px).
     private void InitDefaultPosition()
     {
-        double scale = RenderScaling > 0 ? RenderScaling : 1;
+        double rs = RenderScaling > 0 ? RenderScaling : 1;
+        double s = _scale.ScaleX;
         var wa = Screens.Primary?.WorkingArea ?? new PixelRect(0, 0, 1920, 1080);
-        _kbPos = new PixelPoint(
-            wa.X + (wa.Width - (int)(_presetW * scale)) / 2,
-            wa.Y + wa.Height - (int)(_presetH * scale) - 40);
+        int w = (int)((KbW + 16) * s * rs);
+        int h = (int)((44 + 5 * RowH + 16) * s * rs);
+        _kbPos = new PixelPoint(wa.X + (wa.Width - w) / 2, wa.Y + wa.Height - h - 40);
     }
 
-    // Single source of truth for window size/position: full keyboard when the body should
-    // show, otherwise shrink to just the mode button (kept at the same screen spot).
+    // Show/hide the keys (the window auto-sizes via SizeToContent); the top row with the mode
+    // button always stays. The window top-left is anchored to _kbPos.
     private void UpdateGeometry()
     {
         _bodyVisible = currentMode == KeyboardMode.Show ||
                        (currentMode == KeyboardMode.Auto && _focusEditable);
-        _viewbox.IsVisible = _bodyVisible;
-
-        double scale = RenderScaling > 0 ? RenderScaling : 1;
-        if (_bodyVisible)
-        {
-            Width = _presetW; Height = _presetH;
-            Position = _kbPos;
-        }
-        else
-        {
-            Width = ModeBtnW; Height = ModeBtnH + 4;
-            Position = new PixelPoint(_kbPos.X + (int)((_presetW - ModeBtnW) / 2 * scale), _kbPos.Y);
-        }
-        MakeTopmost(_hwnd);
+        _bodyRow.IsVisible = _bodyVisible;
+        ReassertWindow();
     }
 
-    // Derive the stored keyboard position from the current window position after a drag.
-    private void SyncKbPosFromWindow()
+    // Re-anchor position and topmost after a SizeToContent change (which can run async).
+    private void ReassertWindow()
     {
-        if (_bodyVisible) { _kbPos = Position; return; }
-        double scale = RenderScaling > 0 ? RenderScaling : 1;
-        _kbPos = new PixelPoint(Position.X - (int)((_presetW - ModeBtnW) / 2 * scale), Position.Y);
+        if (!_opened) return;
+        Position = _kbPos;
+        MakeTopmost(_hwnd);
+        Dispatcher.UIThread.Post(() => { Position = _kbPos; MakeTopmost(_hwnd); }, DispatcherPriority.Background);
     }
+
+    private void SyncKbPosFromWindow() => _kbPos = Position;
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
@@ -654,13 +638,8 @@ public class MainWindow : Window
     private void SetSize(int state)
     {
         currentSizeState = state;
-        switch (state)
-        {
-            case 0: _presetW = 600; _presetH = 254; break;
-            case 1: _presetW = 850; _presetH = 360; break;
-            case 2: _presetW = 1200; _presetH = 508; break;
-        }
-        if (_opened) UpdateGeometry();
+        _scale.ScaleX = _scale.ScaleY = state switch { 0 => 0.78, 2 => 1.3, _ => 1.0 };
+        ReassertWindow();
         if (_sizeLabel != null)
             _sizeLabel.Text = "Size: " + (state switch { 0 => "Small", 2 => "Large", _ => "Medium" });
     }
@@ -696,12 +675,11 @@ public class MainWindow : Window
         currentLayoutState = state;
         bool full = state == 1;
         if (full) BuildNumpad();
-        _numpadCol.Width = full ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
-        _numpadGrid.IsVisible = full;
-        _mainBorder.Width = full ? 1150 : 850;
+        _numpadGrid.IsVisible = full;   // window grows/shrinks to fit via SizeToContent
 
         foreach (var t in ModTags) SetModState(t, ModState.Off, updateLabels: false);
         UpdateKeys();
+        ReassertWindow();
     }
 
     private void CycleMode()
