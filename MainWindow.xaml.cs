@@ -55,14 +55,15 @@ namespace DesktopKeyboard
         private ModState ctrlState  = ModState.Off;
         private ModState altState   = ModState.Off;
         private ModState winState   = ModState.Off;
+        private ModState fnState    = ModState.Off;   // local remap (number row -> F1-F12), not a real key
 
         private static readonly Color LockColor = Color.FromRgb(210, 140, 30); // amber = locked
 
         private static readonly string[] ModTags =
-            { "TOGGLE_SHIFT", "TOGGLE_CTRL", "TOGGLE_ALT", "TOGGLE_WIN" };
+            { "TOGGLE_SHIFT", "TOGGLE_CTRL", "TOGGLE_ALT", "TOGGLE_WIN", "TOGGLE_FN" };
 
         private readonly DispatcherTimer _longPressTimer =
-            new() { Interval = TimeSpan.FromMilliseconds(500) };
+            new() { Interval = TimeSpan.FromMilliseconds(300) };
         private string? _longPressTag;
         private bool _longPressActive;
         private bool _longPressFired;
@@ -700,7 +701,7 @@ namespace DesktopKeyboard
                     _hideTimer.Stop();
                 }
 
-                if (tag is "TOGGLE_SHIFT" or "TOGGLE_CTRL" or "TOGGLE_ALT" or "TOGGLE_WIN")
+                if (tag is "TOGGLE_SHIFT" or "TOGGLE_CTRL" or "TOGGLE_ALT" or "TOGGLE_WIN" or "TOGGLE_FN")
                 {
                     // A long-press already locked this modifier; swallow the matching click.
                     if (_longPressFired && tag == _longPressTag)
@@ -714,6 +715,10 @@ namespace DesktopKeyboard
                 }
 
                 byte vk = GetVirtualKeyCode(tag);
+
+                // Fn remaps the number row (1-0, -, =) to F1-F12 while active.
+                if (fnState != ModState.Off && FnKey(tag) is byte fk) vk = fk;
+
                 if (vk != 0)
                 {
                     bool ctrl = ctrlState != ModState.Off;
@@ -747,6 +752,7 @@ namespace DesktopKeyboard
             "TOGGLE_CTRL"  => ctrlState,
             "TOGGLE_ALT"   => altState,
             "TOGGLE_WIN"   => winState,
+            "TOGGLE_FN"    => fnState,
             _              => ModState.Off,
         };
 
@@ -758,6 +764,7 @@ namespace DesktopKeyboard
                 case "TOGGLE_CTRL":  ctrlState  = state; break;
                 case "TOGGLE_ALT":   altState   = state; break;
                 case "TOGGLE_WIN":   winState   = state; break;
+                case "TOGGLE_FN":    fnState    = state; break;
             }
 
             // Off -> themed key brush; OneShot -> accent; Locked -> amber.
@@ -771,7 +778,8 @@ namespace DesktopKeyboard
                 }
             });
 
-            if (tag == "TOGGLE_SHIFT") UpdateKeys(this, state != ModState.Off);
+            // Shift and Fn both change key labels.
+            if (tag == "TOGGLE_SHIFT" || tag == "TOGGLE_FN") UpdateKeys(this);
         }
 
         private void ConsumeOneShotModifiers()
@@ -780,7 +788,17 @@ namespace DesktopKeyboard
             if (ctrlState  == ModState.OneShot) SetModState("TOGGLE_CTRL",  ModState.Off);
             if (altState   == ModState.OneShot) SetModState("TOGGLE_ALT",   ModState.Off);
             if (winState   == ModState.OneShot) SetModState("TOGGLE_WIN",   ModState.Off);
+            if (fnState    == ModState.OneShot) SetModState("TOGGLE_FN",    ModState.Off);
         }
+
+        // number-row tag -> function-key VK while Fn is active (1->F1 ... 0->F10, - ->F11, = ->F12)
+        private static byte? FnKey(string tag) => tag switch
+        {
+            "1" => 0x70, "2" => 0x71, "3" => 0x72, "4" => 0x73, "5" => 0x74,
+            "6" => 0x75, "7" => 0x76, "8" => 0x77, "9" => 0x78, "0" => 0x79,
+            "MINUS" => 0x7A, "EQUALS" => 0x7B,
+            _ => null,
+        };
 
         // --- Long-press detection (locks a modifier) -------------------------
 
@@ -839,15 +857,22 @@ namespace DesktopKeyboard
             }
         }
 
-        private void UpdateKeys(DependencyObject parent, bool isShifted)
+        private void UpdateKeys(DependencyObject parent)
         {
+            bool isShifted = shiftState != ModState.Off;
+            bool isFn      = fnState   != ModState.Off;
+
             foreach (object child in LogicalTreeHelper.GetChildren(parent))
             {
                 if (child is Button btn && btn.Tag != null)
                 {
                     string tag = btn.Tag.ToString() ?? "";
 
-                    if (tag.Length == 1 && char.IsLetter(tag[0]))
+                    if (isFn && FnLabel(tag) is string fl)
+                    {
+                        btn.Content = fl;
+                    }
+                    else if (tag.Length == 1 && char.IsLetter(tag[0]))
                     {
                         btn.Content = isShifted ? tag.ToUpper() : tag.ToLower();
                     }
@@ -855,7 +880,7 @@ namespace DesktopKeyboard
                     {
                         btn.Content = isShifted ? GetShiftedNumber(tag[0]) : tag;
                     }
-                    else if (tag == "COMMA" || tag == "PERIOD" || tag == "SLASH")
+                    else if (tag is "COMMA" or "PERIOD" or "SLASH" or "GRAVE" or "MINUS" or "EQUALS")
                     {
                         btn.Content = isShifted ? GetShiftedSymbol(tag) : GetNormalSymbol(tag);
                     }
@@ -863,10 +888,19 @@ namespace DesktopKeyboard
                 }
                 else if (child is DependencyObject depObj)
                 {
-                    UpdateKeys(depObj, isShifted);
+                    UpdateKeys(depObj);
                 }
             }
         }
+
+        // number-row label while Fn is active (matches FnKey)
+        private static string? FnLabel(string tag) => tag switch
+        {
+            "1" => "F1", "2" => "F2", "3" => "F3", "4" => "F4", "5" => "F5",
+            "6" => "F6", "7" => "F7", "8" => "F8", "9" => "F9", "0" => "F10",
+            "MINUS" => "F11", "EQUALS" => "F12",
+            _ => null,
+        };
 
         private string GetShiftedNumber(char c)
         {
@@ -893,6 +927,9 @@ namespace DesktopKeyboard
                 "COMMA" => "<",
                 "PERIOD" => ">",
                 "SLASH" => "?",
+                "GRAVE" => "~",
+                "MINUS" => "_",
+                "EQUALS" => "+",
                 _ => tag
             };
         }
@@ -904,6 +941,9 @@ namespace DesktopKeyboard
                 "COMMA" => ",",
                 "PERIOD" => ".",
                 "SLASH" => "/",
+                "GRAVE" => "`",
+                "MINUS" => "-",
+                "EQUALS" => "=",
                 _ => tag
             };
         }
@@ -927,6 +967,9 @@ namespace DesktopKeyboard
                 "COMMA" => 0xBC,
                 "PERIOD" => 0xBE,
                 "SLASH" => 0xBF,
+                "GRAVE" => 0xC0,
+                "MINUS" => 0xBD,
+                "EQUALS" => 0xBB,
 
                 "LEFT" => 0x25,
                 "UP" => 0x26,
