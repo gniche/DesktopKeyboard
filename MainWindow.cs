@@ -67,25 +67,23 @@ public class MainWindow : Window
     // --- Mode (Auto/Show/Hide) + floating button -----------------------------
     private enum KeyboardMode { Auto, Show, Hide }
     private KeyboardMode currentMode = KeyboardMode.Auto;
-    private Window? _modeWindow;
-    private Border? _modeBg;
+    private Border _modeBg = null!;       // the mode button, a child of this window (no 2nd window)
     private TextBlock? _modeText;
     private TextBlock[] _modeOutline = Array.Empty<TextBlock>();
     private const double ModeBtnW = 96, ModeBtnH = 32;
     private bool _modeDragging;
-    private int _modeDownX, _modeDownY;   // screen pos where a mode-button press started (tap vs drag)
-    private int _modeGrabX, _modeGrabY;   // finger-to-keyboard offset captured for the drag
-    private int _grabX, _grabY;           // pointer-to-window offset captured when a top-bar drag starts
-    // Re-asserts the mode button above the keyboard shortly after a show settles (both are
-    // topmost, so their relative order isn't otherwise guaranteed).
-    private readonly DispatcherTimer _bringTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
+    private int _modeDownX, _modeDownY;   // screen pos where a press started (tap vs drag)
+    private int _grabX, _grabY;           // pointer-to-window offset captured at drag start
 
     // --- Window / lifecycle --------------------------------------------------
     private readonly IClassicDesktopStyleApplicationLifetime _desktop;
     private IntPtr _hwnd;
-    private bool _shown;
-    private PixelPoint _kbPos;
-    private bool Visible => _shown && IsVisible;
+    private bool _opened;
+    private PixelPoint _kbPos;          // full-keyboard top-left in screen px
+    private bool _bodyVisible;          // are the keys shown (vs. just the mode button)
+    private Viewbox _viewbox = null!;
+    private double _presetW = 850, _presetH = 360;
+    private bool _focusEditable;        // last UIA focus classification (Auto mode)
 
     private bool runOnStartup, _loading, _settingsLoaded;
     private long _suppressHideUntil;
@@ -134,14 +132,13 @@ public class MainWindow : Window
         _hideTimer.Tick += HideTimer_Tick;
         _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); SaveSettingsNow(); };
         _longPressTimer.Tick += LongPress_Tick;
-        _bringTimer.Tick += (_, _) => { _bringTimer.Stop(); RaiseModeAboveKeyboard(); };
-
-        PositionChanged += (_, _) => { _kbPos = Position; RepositionModeWindow(); };
 
         Dispatcher.UIThread.Post(() =>
         {
-            CreateModeButton();
+            Show();                     // always visible; shrinks to the mode button when hidden
+            InitDefaultPosition();
             LoadSettings();
+            UpdateGeometry();
             StartPerfLog();
         }, DispatcherPriority.Loaded);
 
@@ -189,7 +186,69 @@ public class MainWindow : Window
         root.Children.Add(body);
         _mainBorder.Child = root;
 
-        return new Viewbox { Stretch = Stretch.Uniform, Child = _mainBorder };
+        // The keyboard scales in a Viewbox; the mode button overlays the top-centre as a
+        // sibling so it stays put when the keys are collapsed (window shrinks to just it).
+        _viewbox = new Viewbox { Stretch = Stretch.Uniform, Child = _mainBorder };
+        var outer = new Grid();
+        outer.Children.Add(_viewbox);
+        outer.Children.Add(BuildModeButton());
+        return outer;
+    }
+
+    private Control BuildModeButton()
+    {
+        _modeText = MakeModeLabel(Brushes.White, 0, 0);
+        _modeOutline = new[]
+        {
+            MakeModeLabel(Brushes.Black, -1, -1), MakeModeLabel(Brushes.Black, 1, -1),
+            MakeModeLabel(Brushes.Black, -1, 1), MakeModeLabel(Brushes.Black, 1, 1),
+        };
+        var labelGrid = new Grid();
+        foreach (var t in _modeOutline) labelGrid.Children.Add(t);
+        labelGrid.Children.Add(_modeText);
+
+        _modeBg = new Border
+        {
+            CornerRadius = new CornerRadius(6),
+            Background = new ImmutableSolidColorBrush(Color.FromRgb(0x25, 0x25, 0x25)),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Width = ModeBtnW,
+            Height = ModeBtnH,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 4, 0, 0),
+            Child = labelGrid,
+        };
+
+        // Tap cycles the mode; drag moves the whole window (works shown or collapsed).
+        _modeBg.PointerPressed += (_, e) =>
+        {
+            e.Pointer.Capture(_modeBg);
+            var f = this.PointToScreen(e.GetPosition(this));
+            _modeDownX = f.X; _modeDownY = f.Y;
+            _grabX = f.X - Position.X; _grabY = f.Y - Position.Y;
+            _modeDragging = false;
+        };
+        _modeBg.PointerMoved += (_, e) =>
+        {
+            if (!ReferenceEquals(e.Pointer.Captured, _modeBg)) return;
+            var f = this.PointToScreen(e.GetPosition(this));
+            if (!_modeDragging && (Math.Abs(f.X - _modeDownX) > 6 || Math.Abs(f.Y - _modeDownY) > 6))
+                _modeDragging = true;
+            if (_modeDragging)
+            {
+                Position = new PixelPoint(f.X - _grabX, f.Y - _grabY);
+                SyncKbPosFromWindow();
+            }
+        };
+        _modeBg.PointerReleased += (_, e) =>
+        {
+            e.Pointer.Capture(null);
+            if (_modeDragging) { _modeDragging = false; return; }
+            CycleMode();
+        };
+
+        return _modeBg;
     }
 
     private Control BuildTopBar()
@@ -246,11 +305,10 @@ public class MainWindow : Window
         {
             if (!ReferenceEquals(e.Pointer.Captured, bar)) return;
             var p = this.PointToScreen(e.GetPosition(this));
-            _kbPos = new PixelPoint(p.X - _grabX, p.Y - _grabY);
-            Position = _kbPos;
-            RepositionModeWindow();
+            Position = new PixelPoint(p.X - _grabX, p.Y - _grabY);
+            SyncKbPosFromWindow();
         };
-        bar.PointerReleased += (_, e) => { e.Pointer.Capture(null); BringModeButtonToFront(); };
+        bar.PointerReleased += (_, e) => e.Pointer.Capture(null);
 
         return bar;
     }
@@ -403,7 +461,47 @@ public class MainWindow : Window
         base.OnOpened(e);
         _hwnd = TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
         NoActivate(_hwnd);
-        Position = _kbPos;
+        _opened = true;
+    }
+
+    // Default keyboard position: bottom-centre of the work area (px).
+    private void InitDefaultPosition()
+    {
+        double scale = RenderScaling > 0 ? RenderScaling : 1;
+        var wa = Screens.Primary?.WorkingArea ?? new PixelRect(0, 0, 1920, 1080);
+        _kbPos = new PixelPoint(
+            wa.X + (wa.Width - (int)(_presetW * scale)) / 2,
+            wa.Y + wa.Height - (int)(_presetH * scale) - 40);
+    }
+
+    // Single source of truth for window size/position: full keyboard when the body should
+    // show, otherwise shrink to just the mode button (kept at the same screen spot).
+    private void UpdateGeometry()
+    {
+        _bodyVisible = currentMode == KeyboardMode.Show ||
+                       (currentMode == KeyboardMode.Auto && _focusEditable);
+        _viewbox.IsVisible = _bodyVisible;
+
+        double scale = RenderScaling > 0 ? RenderScaling : 1;
+        if (_bodyVisible)
+        {
+            Width = _presetW; Height = _presetH;
+            Position = _kbPos;
+        }
+        else
+        {
+            Width = ModeBtnW; Height = ModeBtnH + 4;
+            Position = new PixelPoint(_kbPos.X + (int)((_presetW - ModeBtnW) / 2 * scale), _kbPos.Y);
+        }
+        MakeTopmost(_hwnd);
+    }
+
+    // Derive the stored keyboard position from the current window position after a drag.
+    private void SyncKbPosFromWindow()
+    {
+        if (_bodyVisible) { _kbPos = Position; return; }
+        double scale = RenderScaling > 0 ? RenderScaling : 1;
+        _kbPos = new PixelPoint(Position.X - (int)((_presetW - ModeBtnW) / 2 * scale), Position.Y);
     }
 
     protected override void OnClosing(WindowClosingEventArgs e)
@@ -425,15 +523,6 @@ public class MainWindow : Window
         SetWindowLong(h, GWL_EXSTYLE, new IntPtr(ex));
         MakeTopmost(h);
     }
-
-    private void ShowKeyboard()
-    {
-        if (!_shown) { Show(); _shown = true; }
-        else IsVisible = true;
-        MakeTopmost(_hwnd);
-    }
-
-    private void HideKeyboard() => IsVisible = false;
 
     // --- Focus-driven show/hide (UI Automation) ------------------------------
     private void RegisterFocusTracking()
@@ -466,13 +555,10 @@ public class MainWindow : Window
         if (editable)
         {
             _hideTimer.Stop();
-            if (!Visible)
-            {
-                ShowKeyboard();
-                BringModeButtonToFront();
-            }
+            _focusEditable = true;
+            if (!_bodyVisible) UpdateGeometry();
         }
-        else if (Visible)
+        else if (_bodyVisible)
         {
             if (Environment.TickCount64 < _suppressHideUntil) return;
             _hideTimer.Start();
@@ -520,7 +606,7 @@ public class MainWindow : Window
         _hideTimer.Stop();
         if (currentMode != KeyboardMode.Auto) return;
         if (Environment.TickCount64 < _suppressHideUntil) return;
-        if (Visible) { HideKeyboard(); _themePopup.IsOpen = false; }
+        if (_bodyVisible) { _focusEditable = false; _themePopup.IsOpen = false; UpdateGeometry(); }
     }
 
     // --- Close confirmation --------------------------------------------------
@@ -545,6 +631,7 @@ public class MainWindow : Window
             Title = "Desktop Keyboard",
             Width = 280, Height = 120,
             CanResize = false,
+            Topmost = true,   // above the topmost keyboard
             WindowStartupLocation = WindowStartupLocation.CenterScreen,
             Background = new ImmutableSolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E)),
         };
@@ -569,11 +656,11 @@ public class MainWindow : Window
         currentSizeState = state;
         switch (state)
         {
-            case 0: Width = 600; Height = 254; break;
-            case 1: Width = 850; Height = 360; break;
-            case 2: Width = 1200; Height = 508; break;
+            case 0: _presetW = 600; _presetH = 254; break;
+            case 1: _presetW = 850; _presetH = 360; break;
+            case 2: _presetW = 1200; _presetH = 508; break;
         }
-        RepositionModeWindow();
+        if (_opened) UpdateGeometry();
         if (_sizeLabel != null)
             _sizeLabel.Text = "Size: " + (state switch { 0 => "Small", 2 => "Large", _ => "Medium" });
     }
@@ -601,6 +688,7 @@ public class MainWindow : Window
             if (k.CS > 1) Grid.SetColumnSpan(key, k.CS);
             _numpadGrid.Children.Add(key);
         }
+        ApplyTheme();   // the just-created keys need their themed background applied
     }
 
     private void SetLayout(int state)
@@ -614,116 +702,6 @@ public class MainWindow : Window
 
         foreach (var t in ModTags) SetModState(t, ModState.Off, updateLabels: false);
         UpdateKeys();
-    }
-
-    // --- Floating mode button ------------------------------------------------
-    private void CreateModeButton()
-    {
-        if (_modeWindow != null) return;
-
-        _modeText = MakeModeLabel(Brushes.White, 0, 0);
-        _modeOutline = new[]
-        {
-            MakeModeLabel(Brushes.Black, -1, -1), MakeModeLabel(Brushes.Black, 1, -1),
-            MakeModeLabel(Brushes.Black, -1, 1), MakeModeLabel(Brushes.Black, 1, 1),
-        };
-        var labelGrid = new Grid();
-        foreach (var t in _modeOutline) labelGrid.Children.Add(t);
-        labelGrid.Children.Add(_modeText);
-
-        _modeBg = new Border
-        {
-            CornerRadius = new CornerRadius(6),
-            Background = new ImmutableSolidColorBrush(Color.FromRgb(0x25, 0x25, 0x25)),
-            Cursor = new Cursor(StandardCursorType.Hand),
-            Child = labelGrid,
-        };
-
-        _modeBg.PointerPressed += (_, e) =>
-        {
-            e.Pointer.Capture(_modeBg);
-            var f = _modeBg!.PointToScreen(e.GetPosition(_modeBg));
-            _modeDownX = f.X; _modeDownY = f.Y;
-            _modeGrabX = f.X - _kbPos.X; _modeGrabY = f.Y - _kbPos.Y;
-            _modeDragging = false;
-        };
-        _modeBg.PointerMoved += (_, e) =>
-        {
-            if (!ReferenceEquals(e.Pointer.Captured, _modeBg)) return;
-            var f = _modeBg!.PointToScreen(e.GetPosition(_modeBg));
-            if (!_modeDragging && (Math.Abs(f.X - _modeDownX) > 6 || Math.Abs(f.Y - _modeDownY) > 6))
-                _modeDragging = true;
-            if (_modeDragging)
-            {
-                _kbPos = new PixelPoint(f.X - _modeGrabX, f.Y - _modeGrabY);
-                if (_shown) Position = _kbPos;
-                RepositionModeWindow();
-            }
-        };
-        _modeBg.PointerReleased += (_, e) =>
-        {
-            e.Pointer.Capture(null);
-            if (_modeDragging) { _modeDragging = false; return; }
-            CycleMode();
-        };
-
-        _modeWindow = new Window
-        {
-            SystemDecorations = SystemDecorations.None,
-            TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent },
-            Background = Brushes.Transparent,
-            Topmost = true,
-            ShowActivated = false,
-            ShowInTaskbar = false,
-            CanResize = false,
-            WindowStartupLocation = WindowStartupLocation.Manual,
-            Width = ModeBtnW,
-            Height = ModeBtnH,
-            Title = "Keyboard Toggle",
-            Content = _modeBg,
-        };
-        _modeWindow.Opened += (_, _) =>
-            NoActivate(_modeWindow!.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero, toolWindow: true);
-
-        // Default keyboard position: bottom-centre of the work area.
-        _modeWindow.Show();
-        double scale = _modeWindow.RenderScaling;
-        var wa = _modeWindow.Screens.Primary?.WorkingArea ?? new PixelRect(0, 0, 1920, 1080);
-        _kbPos = new PixelPoint(
-            wa.X + (wa.Width - (int)(Width * scale)) / 2,
-            wa.Y + wa.Height - (int)(Height * scale) - 40);
-
-        RepositionModeWindow();
-        ApplyTheme();
-        UpdateModeButton();
-    }
-
-    private void RepositionModeWindow()
-    {
-        if (_modeWindow == null) return;
-        double scale = _modeWindow.RenderScaling;
-        _modeWindow.Position = new PixelPoint(
-            _kbPos.X + (int)((Width - ModeBtnW) / 2 * scale),
-            _kbPos.Y + (int)(4 * scale));
-    }
-
-    private void BringModeButtonToFront()
-    {
-        // Do it now, then again after the show/topmost calls settle (the OS may finish
-        // raising the keyboard asynchronously after this returns).
-        RaiseModeAboveKeyboard();
-        _bringTimer.Stop();
-        _bringTimer.Start();
-    }
-
-    private void RaiseModeAboveKeyboard()
-    {
-        if (_modeWindow == null) return;
-        var modeH = _modeWindow.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
-        if (modeH == IntPtr.Zero) return;
-        MakeTopmost(modeH);
-        if (_hwnd != IntPtr.Zero)
-            SetWindowPos(_hwnd, modeH, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     private void CycleMode()
@@ -740,23 +718,10 @@ public class MainWindow : Window
 
     private void ApplyMode()
     {
-        switch (currentMode)
-        {
-            case KeyboardMode.Show:
-                _hideTimer.Stop();
-                ShowKeyboard();
-                RepositionModeWindow();
-                BringModeButtonToFront();
-                break;
-            case KeyboardMode.Hide:
-                _hideTimer.Stop();
-                HideKeyboard();
-                _themePopup.IsOpen = false;
-                TrimWorkingSet();
-                break;
-            case KeyboardMode.Auto:
-                break;
-        }
+        _hideTimer.Stop();
+        UpdateGeometry();
+        if (!_bodyVisible) _themePopup.IsOpen = false;
+        if (currentMode == KeyboardMode.Hide) TrimWorkingSet();
         UpdateModeButton();
     }
 
@@ -951,7 +916,7 @@ public class MainWindow : Window
         double cpuPct = wallMs > 0 ? cpuMs / (wallMs * Environment.ProcessorCount) * 100.0 : 0;
         double wsMb = proc.WorkingSet64 / (1024.0 * 1024.0);
         double gcMb = GC.GetTotalMemory(false) / (1024.0 * 1024.0);
-        PerfWrite($"cpu={cpuPct,5:F1}%  ws={wsMb,6:F1}MB  gcHeap={gcMb,5:F1}MB  visible={(Visible ? 1 : 0)}");
+        PerfWrite($"cpu={cpuPct,5:F1}%  ws={wsMb,6:F1}MB  gcHeap={gcMb,5:F1}MB  visible={(_bodyVisible ? 1 : 0)}");
     }
 
     private void PerfWrite(string body)
