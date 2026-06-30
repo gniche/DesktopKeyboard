@@ -27,22 +27,31 @@
                                  Four 1px-offset black copies of the glyph form the outline. This is pure
                                  text drawing with NO pixel-shader Effect: a BlurEffect/DropShadowEffect
                                  here forces an offscreen render pass per key, re-rasterized under the
-                                 Viewbox scale on every press-animation frame — the cause of high CPU. -->
-                            <Grid Margin="0,0,0,3" TextElement.Foreground="Black">
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                    <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="-1"/></ContentPresenter.RenderTransform>
-                                </ContentPresenter>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                    <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="-1"/></ContentPresenter.RenderTransform>
-                                </ContentPresenter>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                    <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="1"/></ContentPresenter.RenderTransform>
-                                </ContentPresenter>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                    <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="1"/></ContentPresenter.RenderTransform>
-                                </ContentPresenter>
+                                 Viewbox scale on every press-animation frame — the cause of high CPU.
+                                 The whole glyph (outline + white top) is BitmapCache'd so a press-fade
+                                 frame composites a cached bitmap instead of re-rasterizing 5 text layers;
+                                 RenderAtScale=2 keeps it crisp through the Viewbox at every size preset.
+                                 It re-rasterizes only when the label changes (Shift/Fn), which is rare. -->
+                            <Grid>
+                                <Grid.CacheMode>
+                                    <BitmapCache RenderAtScale="2"/>
+                                </Grid.CacheMode>
+                                <Grid Margin="0,0,0,3" TextElement.Foreground="Black">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                        <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="-1"/></ContentPresenter.RenderTransform>
+                                    </ContentPresenter>
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                        <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="-1"/></ContentPresenter.RenderTransform>
+                                    </ContentPresenter>
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                        <ContentPresenter.RenderTransform><TranslateTransform X="-1" Y="1"/></ContentPresenter.RenderTransform>
+                                    </ContentPresenter>
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                        <ContentPresenter.RenderTransform><TranslateTransform X="1" Y="1"/></ContentPresenter.RenderTransform>
+                                    </ContentPresenter>
+                                </Grid>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
                             </Grid>
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsPressed" Value="True">
@@ -57,8 +66,10 @@
                                 <Trigger.ExitActions>
                                     <BeginStoryboard>
                                         <Storyboard>
+                                            <!-- Cap the fade at 30fps: each frame is a whole-window layered blit,
+                                                 so halving the frame rate halves the blits per press. -->
                                             <DoubleAnimation Storyboard.TargetName="PressHighlight" Storyboard.TargetProperty="Opacity"
-                                                             To="0" Duration="0:0:0.12"/>
+                                                             To="0" Duration="0:0:0.12" Timeline.DesiredFrameRate="30"/>
                                         </Storyboard>
                                     </BeginStoryboard>
                                 </Trigger.ExitActions>
