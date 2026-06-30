@@ -48,9 +48,24 @@ namespace DesktopKeyboard
 
         private int currentSizeState   = 1;
         private int currentLayoutState = 0;
-        private bool isShiftActive = false;
-        private bool isCtrlActive  = false;
-        private bool isAltActive   = false;
+        // Modifier behaviour: a tap arms the modifier for the next key only (OneShot),
+        // then it clears automatically; a long-press locks it on until tapped again.
+        private enum ModState { Off, OneShot, Locked }
+        private ModState shiftState = ModState.Off;
+        private ModState ctrlState  = ModState.Off;
+        private ModState altState   = ModState.Off;
+        private ModState winState   = ModState.Off;
+
+        private static readonly Color LockColor = Color.FromRgb(210, 140, 30); // amber = locked
+
+        private static readonly string[] ModTags =
+            { "TOGGLE_SHIFT", "TOGGLE_CTRL", "TOGGLE_ALT", "TOGGLE_WIN" };
+
+        private readonly DispatcherTimer _longPressTimer =
+            new() { Interval = TimeSpan.FromMilliseconds(500) };
+        private string? _longPressTag;
+        private bool _longPressActive;
+        private bool _longPressFired;
         private bool isManuallyHidden = false;
 
         private enum KeyboardMode { Auto, Show, Hide }
@@ -85,6 +100,9 @@ namespace DesktopKeyboard
 
             _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _hideTimer.Tick += HideTimer_Tick;
+
+            _longPressTimer.Tick += LongPress_Tick;
+            AttachModifierHandlers();
 
             // Create the floating mode button and restore settings as soon as the message
             // loop starts — this runs at startup independent of the main window ever being
@@ -310,13 +328,7 @@ namespace DesktopKeyboard
             MainBorder.Height = h;
 
             // Reset modifiers when changing layouts so they aren't stuck active on a hidden panel
-            isShiftActive = false;
-            isCtrlActive  = false;
-            isAltActive   = false;
-            UpdateKeys(this, false);
-            SetModifierActive("TOGGLE_SHIFT", false);
-            SetModifierActive("TOGGLE_CTRL",  false);
-            SetModifierActive("TOGGLE_ALT",   false);
+            foreach (var t in ModTags) SetModState(t, ModState.Off);
         }
 
         // --- Hue / Opacity theming -------------------------------------------
@@ -688,62 +700,132 @@ namespace DesktopKeyboard
                     _hideTimer.Stop();
                 }
 
-                if (tag == "TOGGLE_SHIFT")
+                if (tag is "TOGGLE_SHIFT" or "TOGGLE_CTRL" or "TOGGLE_ALT" or "TOGGLE_WIN")
                 {
-                    isShiftActive = !isShiftActive;
-                    SetModifierActive("TOGGLE_SHIFT", isShiftActive);
-                    UpdateKeys(this, isShiftActive);
-                    return;
-                }
-
-                if (tag == "TOGGLE_CTRL")
-                {
-                    isCtrlActive = !isCtrlActive;
-                    SetModifierActive("TOGGLE_CTRL", isCtrlActive);
-                    return;
-                }
-
-                if (tag == "TOGGLE_ALT")
-                {
-                    isAltActive = !isAltActive;
-                    SetModifierActive("TOGGLE_ALT", isAltActive);
-                    return;
-                }
-
-                if (tag == "WIN")
-                {
-                    keybd_event(VK_LWIN, 0, 0, 0);
-                    keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                    // A long-press already locked this modifier; swallow the matching click.
+                    if (_longPressFired && tag == _longPressTag)
+                    {
+                        _longPressFired = false;
+                        return;
+                    }
+                    // Tap: Off -> OneShot, OneShot/Locked -> Off.
+                    SetModState(tag, GetModState(tag) == ModState.Off ? ModState.OneShot : ModState.Off);
                     return;
                 }
 
                 byte vk = GetVirtualKeyCode(tag);
                 if (vk != 0)
                 {
-                    if (isCtrlActive) keybd_event(VK_LCONTROL, 0, 0, 0);
-                    if (isAltActive)  keybd_event(VK_LMENU, 0, 0, 0);
-                    if (isShiftActive) keybd_event(VK_LSHIFT, 0, 0, 0);
+                    bool ctrl = ctrlState != ModState.Off;
+                    bool alt   = altState  != ModState.Off;
+                    bool shift = shiftState != ModState.Off;
+                    bool win   = winState  != ModState.Off;
+
+                    if (ctrl)  keybd_event(VK_LCONTROL, 0, 0, 0);
+                    if (alt)   keybd_event(VK_LMENU, 0, 0, 0);
+                    if (shift) keybd_event(VK_LSHIFT, 0, 0, 0);
+                    if (win)   keybd_event(VK_LWIN, 0, 0, 0);
 
                     keybd_event(vk, 0, 0, 0);
                     keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
 
-                    if (isShiftActive) keybd_event(VK_LSHIFT, 0, KEYEVENTF_KEYUP, 0);
-                    if (isAltActive)  keybd_event(VK_LMENU, 0, KEYEVENTF_KEYUP, 0);
-                    if (isCtrlActive) keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0);
+                    if (win)   keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                    if (shift) keybd_event(VK_LSHIFT, 0, KEYEVENTF_KEYUP, 0);
+                    if (alt)   keybd_event(VK_LMENU, 0, KEYEVENTF_KEYUP, 0);
+                    if (ctrl)  keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0);
+
+                    ConsumeOneShotModifiers();
                 }
             }
         }
 
-        private void SetModifierActive(string tag, bool active)
+        // --- Modifier state machine ------------------------------------------
+
+        private ModState GetModState(string tag) => tag switch
         {
-            // Active modifiers get the accent colour; inactive ones clear their local
-            // Background so they fall back to the themed {DynamicResource KeyBg} brush
-            // and recolour automatically when the hue changes.
+            "TOGGLE_SHIFT" => shiftState,
+            "TOGGLE_CTRL"  => ctrlState,
+            "TOGGLE_ALT"   => altState,
+            "TOGGLE_WIN"   => winState,
+            _              => ModState.Off,
+        };
+
+        private void SetModState(string tag, ModState state)
+        {
+            switch (tag)
+            {
+                case "TOGGLE_SHIFT": shiftState = state; break;
+                case "TOGGLE_CTRL":  ctrlState  = state; break;
+                case "TOGGLE_ALT":   altState   = state; break;
+                case "TOGGLE_WIN":   winState   = state; break;
+            }
+
+            // Off -> themed key brush; OneShot -> accent; Locked -> amber.
             ApplyToTag(this, tag, btn =>
             {
-                if (active) btn.Background = new SolidColorBrush(ActiveColor);
-                else btn.ClearValue(Button.BackgroundProperty);
+                switch (state)
+                {
+                    case ModState.Off:     btn.ClearValue(Button.BackgroundProperty); break;
+                    case ModState.OneShot: btn.Background = new SolidColorBrush(ActiveColor); break;
+                    case ModState.Locked:  btn.Background = new SolidColorBrush(LockColor); break;
+                }
             });
+
+            if (tag == "TOGGLE_SHIFT") UpdateKeys(this, state != ModState.Off);
+        }
+
+        private void ConsumeOneShotModifiers()
+        {
+            if (shiftState == ModState.OneShot) SetModState("TOGGLE_SHIFT", ModState.Off);
+            if (ctrlState  == ModState.OneShot) SetModState("TOGGLE_CTRL",  ModState.Off);
+            if (altState   == ModState.OneShot) SetModState("TOGGLE_ALT",   ModState.Off);
+            if (winState   == ModState.OneShot) SetModState("TOGGLE_WIN",   ModState.Off);
+        }
+
+        // --- Long-press detection (locks a modifier) -------------------------
+
+        private void AttachModifierHandlers()
+        {
+            foreach (var t in ModTags)
+            {
+                ApplyToTag(this, t, btn =>
+                {
+                    string? bt = btn.Tag?.ToString();
+                    btn.PreviewMouseLeftButtonDown += (s, e) => StartLongPress(bt);
+                    btn.PreviewMouseLeftButtonUp   += (s, e) => StopLongPress();
+                    btn.PreviewTouchDown           += (s, e) => StartLongPress(bt);
+                    btn.PreviewTouchUp             += (s, e) => StopLongPress();
+                });
+            }
+        }
+
+        private void StartLongPress(string? tag)
+        {
+            if (tag == null) return;
+            // Mouse + touch can both fire for one press; only the first arms the timer.
+            if (_longPressActive && _longPressTag == tag) return;
+            _longPressTag = tag;
+            _longPressActive = true;
+            _longPressFired = false;
+            _longPressTimer.Stop();
+            _longPressTimer.Start();
+        }
+
+        private void StopLongPress()
+        {
+            _longPressActive = false;
+            _longPressTimer.Stop();
+        }
+
+        private void LongPress_Tick(object? sender, EventArgs e)
+        {
+            _longPressTimer.Stop();
+            _longPressActive = false;
+            if (_longPressTag != null)
+            {
+                _longPressFired = true;          // tells the click handler to skip the tap toggle
+                SetModState(_longPressTag, ModState.Locked);
+            }
         }
 
         private void ApplyToTag(DependencyObject parent, string tag, Action<Button> action)
