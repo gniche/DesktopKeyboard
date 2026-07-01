@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Win32;
 using Avalonia;
 using Avalonia.Controls;
@@ -10,7 +11,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Immutable;
 using Avalonia.Threading;
-using UIA = System.Windows.Automation;
+using UIA = Interop.UIAutomationClient;
 
 namespace DesktopKeyboard;
 
@@ -30,6 +31,10 @@ public class MainWindow : Window
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     [DllImport("psapi.dll")] static extern int EmptyWorkingSet(IntPtr h);
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] p, int cb);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, char[] name, int max);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    private const uint GA_ROOT = 2;
 
     private static void TrimWorkingSet() { try { EmptyWorkingSet(GetCurrentProcess()); } catch { } }
 
@@ -86,6 +91,14 @@ public class MainWindow : Window
     private PixelPoint _modeAnchor;     // screen px the mode-button centre is pinned to
     private bool _bodyVisible;          // are the keys shown (vs. just the top row)
     private bool _focusEditable;        // last UIA focus classification (Auto mode)
+    private UIA.IUIAutomation? _uia;    // native UIA client, created/owned by the MTA thread
+    private FocusHandler? _focusHandler; // roots the COM focus-event sink for the app's lifetime
+
+    // Focus-detection diagnostics (gated by the same Diag flag as the perf log). Written
+    // from the MTA focus thread + UIA callback threads, so it needs its own locked file.
+    private static bool _diagFocus;
+    private static string? _focusLogPath;
+    private static readonly object _focusLogLock = new();
     private bool _chromeExpanded = true; // Esc + theme/layout/close shown (vs. collapsed behind the toggle)
     private StackPanel _bodyRow = null!;          // keyboard + numpad; collapses when hidden
     private Key _escKey = null!;
@@ -576,29 +589,224 @@ public class MainWindow : Window
     }
 
     // --- Focus-driven show/hide (UI Automation) ------------------------------
+    // Registered and polled from a dedicated MTA thread, per Microsoft's UI Automation
+    // client threading guidance: event-handler threads should be MTA, not the app's own
+    // STA UI thread, or event delivery/unregistration can misbehave.
     private void RegisterFocusTracking()
     {
-        var cache = new UIA.CacheRequest();
-        cache.Add(UIA.AutomationElement.ControlTypeProperty);
-        cache.Add(UIA.AutomationElement.NameProperty);
-        cache.Add(UIA.ValuePattern.Pattern);
-        cache.Add(UIA.ValuePattern.IsReadOnlyProperty);
-        cache.Add(UIA.TextPattern.Pattern);
+        _diagFocus = DiagEnabled();
+        if (_diagFocus)
+            _focusLogPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "DesktopKeyboard_focus.log");
 
-        using (cache.Activate())
-            UIA.Automation.AddAutomationFocusChangedEventHandler(OnFocusChanged);
+        var thread = new Thread(FocusTrackingThreadProc) { IsBackground = true, Name = "UIAFocusTracking" };
+        thread.SetApartmentState(ApartmentState.MTA);
+        thread.Start();
     }
 
-    private void OnFocusChanged(object? sender, UIA.AutomationFocusChangedEventArgs e)
+    // Appends one line to the focus log when Diag is on. Safe from any thread; a no-op
+    // (and near-zero cost) otherwise.
+    private static void FocusLog(string msg)
     {
-        if (currentMode != KeyboardMode.Auto) return;
-        if (sender is not UIA.AutomationElement fe) return;
+        if (!_diagFocus || _focusLogPath == null) return;
+        try
+        {
+            lock (_focusLogLock)
+                System.IO.File.AppendAllText(_focusLogPath,
+                    $"{DateTime.Now:HH:mm:ss.fff} [t{Environment.CurrentManagedThreadId}] {msg}{Environment.NewLine}");
+        }
+        catch { }
+    }
 
-        bool editable;
-        try { editable = IsEditableTextField(fe); }
-        catch { return; }
+    // Last-write time of the running assembly — lets the log prove which binary is live,
+    // so a stale install (MSI skipping same-version file replacement) is obvious.
+    private static string BuildStamp()
+    {
+        try
+        {
+            string loc = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            return string.IsNullOrEmpty(loc) ? "?" : System.IO.File.GetLastWriteTime(loc).ToString("yyyy-MM-dd HH:mm:ss");
+        }
+        catch { return "?"; }
+    }
 
-        Dispatcher.UIThread.Post(() => ApplyFocusVisibility(editable));
+    private static string CtName(int ct) => ct switch
+    {
+        (int)UIA.UIA_ControlTypeIds.UIA_EditControlTypeId => "Edit",
+        (int)UIA.UIA_ControlTypeIds.UIA_ComboBoxControlTypeId => "ComboBox",
+        (int)UIA.UIA_ControlTypeIds.UIA_DocumentControlTypeId => "Document",
+        (int)UIA.UIA_ControlTypeIds.UIA_TextControlTypeId => "Text",
+        (int)UIA.UIA_ControlTypeIds.UIA_ButtonControlTypeId => "Button",
+        (int)UIA.UIA_ControlTypeIds.UIA_HyperlinkControlTypeId => "Hyperlink",
+        (int)UIA.UIA_ControlTypeIds.UIA_ListItemControlTypeId => "ListItem",
+        (int)UIA.UIA_ControlTypeIds.UIA_PaneControlTypeId => "Pane",
+        (int)UIA.UIA_ControlTypeIds.UIA_GroupControlTypeId => "Group",
+        (int)UIA.UIA_ControlTypeIds.UIA_CustomControlTypeId => "Custom",
+        _ => "ct#" + ct,
+    };
+
+    // Full signal snapshot for one focused element (event path only, so it never spams).
+    private static string SnapshotSignals(UIA.IUIAutomationElement el)
+    {
+        int ct = SafeCt(el);
+        string name = "";
+        try { name = el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_NamePropertyId) as string ?? ""; } catch { }
+        if (name.Length > 40) name = name[..40] + "…";
+        bool enabled = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsEnabledPropertyId, true);
+        bool pwd = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsPasswordPropertyId);
+        bool hasVal = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsValuePatternAvailablePropertyId);
+        bool valRo = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_ValueIsReadOnlyPropertyId);
+        bool hasTe = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsTextEditPatternAvailablePropertyId);
+        bool hasLeg = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsLegacyIAccessiblePatternAvailablePropertyId);
+        int role = -1, state = -1;
+        try { if (el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleRolePropertyId) is int r) role = r; } catch { }
+        try { if (el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleStatePropertyId) is int s) state = s; } catch { }
+        return $"  signals: ct={CtName(ct)} name=\"{name}\" enabled={enabled} pwd={pwd} " +
+               $"value={hasVal}(ro={valRo}) textEdit={hasTe} legacy={hasLeg}(role=0x{role:X} state=0x{state:X}) " +
+               $"hostClass=\"{GetHostClass(el)}\"";
+    }
+
+    private static int SafeCt(UIA.IUIAutomationElement el)
+    {
+        try { return (int)el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_ControlTypePropertyId); }
+        catch { return -1; }
+    }
+
+    // Property IDs cached on every focused element (one cross-process fetch per focus
+    // change) so classification below is a pure local read — no per-property round trips.
+    private static readonly int[] _cacheProps =
+    {
+        (int)UIA.UIA_PropertyIds.UIA_ControlTypePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_NamePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_IsEnabledPropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_IsPasswordPropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_IsValuePatternAvailablePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_ValueIsReadOnlyPropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_IsTextEditPatternAvailablePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_IsLegacyIAccessiblePatternAvailablePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleRolePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleStatePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_NativeWindowHandlePropertyId,
+        (int)UIA.UIA_PropertyIds.UIA_ProcessIdPropertyId,
+    };
+
+    // True when the focused element belongs to our own keyboard window. Tapping a key can
+    // briefly move UIA focus onto the OSK; treating that as "focus left the text field"
+    // would hide the keyboard mid-type, so these focus changes must be ignored outright.
+    private static bool IsOwnProcess(UIA.IUIAutomationElement element)
+    {
+        try
+        {
+            object p = element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_ProcessIdPropertyId);
+            int pid = p switch { int i => i, long l => (int)l, _ => 0 };
+            return pid != 0 && pid == Environment.ProcessId;
+        }
+        catch { return false; }
+    }
+
+    // Console/terminal hosts draw their own text and expose no editable UIA signal, so
+    // they're detected by window class instead. Extend as needed.
+    private static readonly string[] _consoleWindowClasses =
+    {
+        "CASCADIA_HOSTING_WINDOW_CLASS", // Windows Terminal
+        "ConsoleWindowClass",            // classic conhost (cmd.exe, powershell.exe)
+        "PseudoConsoleWindow",
+    };
+
+    private void FocusTrackingThreadProc()
+    {
+        FocusLog($"=== focus tracking start (native UIA) pid={Environment.ProcessId} built={BuildStamp()} ===");
+
+        UIA.IUIAutomation uia;
+        UIA.IUIAutomationCacheRequest cache;
+        try
+        {
+            uia = (UIA.IUIAutomation)new UIA.CUIAutomation8();
+            FocusLog("CUIAutomation8 created");
+
+            // IUIAutomation6 (Win10 1809+) hardens the shared event pipe: recover the
+            // connection if a provider crashes, and coalesce event storms instead of
+            // letting one chatty app stall focus delivery for every UIA client.
+            if (uia is UIA.IUIAutomation6 uia6)
+            {
+                try
+                {
+                    uia6.ConnectionRecoveryBehavior = UIA.ConnectionRecoveryBehaviorOptions.ConnectionRecoveryBehaviorOptions_Enabled;
+                    uia6.CoalesceEvents = UIA.CoalesceEventsOptions.CoalesceEventsOptions_Enabled;
+                    FocusLog("IUIAutomation6 reliability knobs enabled");
+                }
+                catch (Exception ex) { FocusLog("IUIAutomation6 knobs failed: " + ex.Message); }
+            }
+            else FocusLog("IUIAutomation6 not available");
+
+            cache = uia.CreateCacheRequest();
+            foreach (int p in _cacheProps) cache.AddProperty(p);
+
+            _uia = uia;
+            _focusHandler = new FocusHandler(this);
+            uia.AddFocusChangedEventHandler(cache, _focusHandler);
+            FocusLog("focus-changed handler registered — waiting for events");
+        }
+        catch (Exception ex)
+        {
+            // no UIA available — auto mode silently degrades to manual
+            FocusLog("COM init FAILED (auto show/hide disabled): " + ex);
+            return;
+        }
+
+        // Safety-net poll: event delivery can be missed (a Chromium tab's accessibility
+        // tree not yet warmed up, a dropped WinEvent, another process's UIA provider
+        // stalling the shared event pipe) so periodically reconcile against the actual
+        // focused element rather than trusting the event alone.
+        bool firstPoll = true;
+        bool lastEditable = false;
+        int lastCt = int.MinValue;
+        while (true)
+        {
+            if (currentMode == KeyboardMode.Auto)
+            {
+                try
+                {
+                    var fe = uia.GetFocusedElementBuildCache(cache);
+                    if (fe != null && !IsOwnProcess(fe))
+                    {
+                        bool editable = IsEditableTextField(fe, out string reason);
+                        int ct = SafeCt(fe);
+                        // Only log when the picture changes, so the 1 Hz poll doesn't flood.
+                        if (firstPoll || editable != lastEditable || ct != lastCt)
+                        {
+                            FocusLog($"[poll] ct={CtName(ct)} editable={editable} ({reason})");
+                            firstPoll = false; lastEditable = editable; lastCt = ct;
+                        }
+                        Dispatcher.UIThread.Post(() => ApplyFocusVisibility(editable));
+                    }
+                }
+                catch (Exception ex) { FocusLog("[poll] error: " + ex.Message); }
+            }
+
+            Thread.Sleep(1000);
+        }
+    }
+
+    // The COM sink UIA calls (on its own MTA thread) for every system-wide focus change.
+    private sealed class FocusHandler(MainWindow owner) : UIA.IUIAutomationFocusChangedEventHandler
+    {
+        public void HandleFocusChangedEvent(UIA.IUIAutomationElement? sender)
+        {
+            if (sender == null) { FocusLog("[event] sender=null"); return; }
+            if (owner.currentMode != KeyboardMode.Auto) { FocusLog("[event] ignored (mode != Auto)"); return; }
+            if (IsOwnProcess(sender)) { FocusLog("[event] ignored (own keyboard window)"); return; }
+
+            bool editable;
+            try
+            {
+                if (_diagFocus) FocusLog("[event]" + Environment.NewLine + SnapshotSignals(sender));
+                editable = IsEditableTextField(sender, out string reason);
+                FocusLog($"[event] -> editable={editable} ({reason})");
+            }
+            catch (Exception ex) { FocusLog("[event] error: " + ex.Message); return; }
+
+            Dispatcher.UIThread.Post(() => owner.ApplyFocusVisibility(editable));
+        }
     }
 
     private void ApplyFocusVisibility(bool editable)
@@ -607,41 +815,165 @@ public class MainWindow : Window
         {
             _hideTimer.Stop();
             _focusEditable = true;
-            if (!_bodyVisible) UpdateGeometry();
+            if (!_bodyVisible) { FocusLog("[apply] editable -> SHOW"); UpdateGeometry(); }
         }
         else if (_bodyVisible)
         {
             if (Environment.TickCount64 < _suppressHideUntil) return;
+            FocusLog("[apply] not editable -> start hide timer");
             _hideTimer.Start();
         }
     }
 
-    private static bool IsEditableTextField(UIA.AutomationElement element)
+    // MSAA role/state bits (oleacc.h) exposed via the LegacyIAccessible pattern.
+    private const int ROLE_SYSTEM_TEXT = 0x2A;
+    private const int STATE_SYSTEM_UNAVAILABLE = 0x1;
+    private const int STATE_SYSTEM_READONLY = 0x40;
+
+    // Ordered strongest-and-cheapest first. Reads are all against the cached element.
+    // `reason` names the rule that decided, for the diagnostic log.
+    private static bool IsEditableTextField(UIA.IUIAutomationElement element, out string reason)
     {
-        var ct = element.Cached.ControlType;
-        if (ct == UIA.ControlType.Edit || ct == UIA.ControlType.ComboBox || ct == UIA.ControlType.Document)
-            return true;
+        int ct;
+        try { ct = (int)element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_ControlTypePropertyId); }
+        catch (Exception ex) { reason = "controltype read failed: " + ex.Message; return false; }
 
-        if (ct == UIA.ControlType.ListItem || ct == UIA.ControlType.TreeItem ||
-            ct == UIA.ControlType.Button || ct == UIA.ControlType.MenuItem ||
-            ct == UIA.ControlType.TabItem || ct == UIA.ControlType.CheckBox ||
-            ct == UIA.ControlType.RadioButton || ct == UIA.ControlType.Hyperlink ||
-            ct == UIA.ControlType.Image || ct == UIA.ControlType.ScrollBar)
+        // 1. Hard negatives: control types that never take text entry. Slider/ProgressBar
+        //    are here specifically because they expose a (settable) ValuePattern and would
+        //    otherwise false-positive at step 4.
+        switch (ct)
+        {
+            case (int)UIA.UIA_ControlTypeIds.UIA_ButtonControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_CheckBoxControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_RadioButtonControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_MenuItemControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_TabItemControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_HyperlinkControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_ImageControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_ScrollBarControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_ListItemControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_TreeItemControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_SliderControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_ProgressBarControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_MenuControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_MenuBarControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_ToolBarControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_TitleBarControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_TreeControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_ListControlTypeId:
+            case (int)UIA.UIA_ControlTypeIds.UIA_TabControlTypeId:
+                reason = "rule1 hard-negative control type";
+                return false;
+        }
+
+        // 2. Disabled elements can't take input (default when unsupported is enabled).
+        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsEnabledPropertyId, defaultValue: true) == false)
+        {
+            reason = "rule2 disabled";
             return false;
+        }
 
+        // 3. Password field: unambiguously editable, and often hides its ValuePattern value.
+        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsPasswordPropertyId))
+        {
+            reason = "rule3 password";
+            return true;
+        }
+
+        // 4. ValuePattern is the primary oracle for text-bearing controls: Core-AAM makes
+        //    editable Edit/Document expose it, and IsReadOnly is authoritative (this both
+        //    accepts multi-line web editors and rejects read-only inputs and page content).
+        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsValuePatternAvailablePropertyId))
+        {
+            string name = element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_NamePropertyId) as string ?? "";
+            if (IsLikelyFileName(name)) { reason = "rule4 value but filename-like name"; return false; }
+            bool ro = GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_ValueIsReadOnlyPropertyId);
+            reason = ro ? "rule4 value read-only" : "rule4 value editable";
+            return !ro;
+        }
+
+        // 5. TextEdit pattern: raised by genuinely editable text surfaces (composition /
+        //    text-edit events) — a stronger positive than plain TextPattern, which read-only
+        //    documents also expose and which caused the original browser false-positives.
+        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsTextEditPatternAvailablePropertyId))
+        {
+            reason = "rule5 textedit pattern";
+            return true;
+        }
+
+        // 6. LegacyIAccessible (MSAA/IA2 bridge, rich in Chrome/Firefox): editable text is
+        //    role TEXT without the read-only/unavailable state bits.
+        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsLegacyIAccessiblePatternAvailablePropertyId))
+        {
+            if (element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleRolePropertyId) is int role &&
+                element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleStatePropertyId) is int state &&
+                role == ROLE_SYSTEM_TEXT &&
+                (state & STATE_SYSTEM_READONLY) == 0 &&
+                (state & STATE_SYSTEM_UNAVAILABLE) == 0)
+            {
+                reason = "rule6 legacy role=TEXT";
+                return true;
+            }
+        }
+
+        // 7. Inherent text controls that exposed no usable pattern (non-conformant
+        //    providers): Edit/ComboBox mean text entry, so give the benefit of the doubt.
+        //    Deliberately NOT Document — a Document with no editable signal is read-only page
+        //    content, the exact false-positive this rewrite fixes.
+        if (ct == (int)UIA.UIA_ControlTypeIds.UIA_EditControlTypeId ||
+            ct == (int)UIA.UIA_ControlTypeIds.UIA_ComboBoxControlTypeId)
+        {
+            reason = "rule7 edit/combobox fallback";
+            return true;
+        }
+
+        // 8. Console/terminal surfaces (Windows Terminal, classic conhost) draw their own
+        //    text and expose NO editable UIA signal — Pane/Text control type, no Value/
+        //    TextEdit, legacy role CLIENT/PANE rather than TEXT. Detect them by the hosting
+        //    window class so focus inside a terminal still raises the keyboard.
+        string cls = GetHostClass(element);
+        foreach (var c in _consoleWindowClasses)
+            if (string.Equals(cls, c, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "rule8 console window class=" + cls;
+                return true;
+            }
+
+        reason = "default no editable signal" + (cls.Length > 0 ? " (hostClass=" + cls + ")" : "");
+        return false;
+    }
+
+    // Class name of the window hosting an element: prefer the element's own native window
+    // handle, falling back to the foreground window (our keyboard is WS_EX_NOACTIVATE, so
+    // it never becomes foreground and can't mask the app being typed into).
+    private static string GetHostClass(UIA.IUIAutomationElement element)
+    {
+        IntPtr hwnd = IntPtr.Zero;
         try
         {
-            if (element.TryGetCachedPattern(UIA.ValuePattern.Pattern, out object? vo) && vo is UIA.ValuePattern vp)
-            {
-                string name = element.Cached.Name ?? "";
-                if (name.Length < 3 || IsLikelyFileName(name)) return false;
-                return !vp.Cached.IsReadOnly;
-            }
-            if (element.TryGetCachedPattern(UIA.TextPattern.Pattern, out object? to) && to != null)
-                return true;
+            object h = element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_NativeWindowHandlePropertyId);
+            hwnd = h switch { int i => new IntPtr(i), long l => new IntPtr(l), _ => IntPtr.Zero };
         }
         catch { }
-        return false;
+        if (hwnd == IntPtr.Zero) hwnd = GetForegroundWindow();
+        if (hwnd == IntPtr.Zero) return "";
+
+        // Walk to the top-level window — a terminal's class lives on its root frame, while a
+        // focused element's native handle is often a child (e.g. a XAML island).
+        IntPtr root = GetAncestor(hwnd, GA_ROOT);
+        if (root != IntPtr.Zero) hwnd = root;
+
+        var buf = new char[256];
+        int n = GetClassName(hwnd, buf, buf.Length);
+        return n > 0 ? new string(buf, 0, n) : "";
+    }
+
+    // Reads a cached boolean; returns defaultValue when the provider doesn't supply one
+    // (GetCachedPropertyValue hands back a non-bool "not supported" sentinel in that case).
+    private static bool GetCachedBool(UIA.IUIAutomationElement element, int propertyId, bool defaultValue = false)
+    {
+        try { return element.GetCachedPropertyValue(propertyId) is bool b ? b : defaultValue; }
+        catch { return defaultValue; }
     }
 
     private static bool IsLikelyFileName(string name)
@@ -975,7 +1307,13 @@ public class MainWindow : Window
     private void OnKeyPressed(Key k)
     {
         string tag = k.KeyTag;
-        if (tag == "ESC") { _suppressHideUntil = Environment.TickCount64 + 800; _hideTimer.Stop(); }
+
+        // Any tap on the keyboard must not let a transient focus change hide it. Interacting
+        // with the OSK can briefly perturb UIA focus (and some apps blur on external input);
+        // refreshed on every press, so continuous typing always stays visible, while a real
+        // focus-away still hides shortly after you stop. Belt to the own-process ignore.
+        _suppressHideUntil = Environment.TickCount64 + 1500;
+        _hideTimer.Stop();
 
         if (_mod.ContainsKey(tag)) { StartLongPress(tag); return; }
 

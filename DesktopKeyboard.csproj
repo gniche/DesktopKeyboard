@@ -29,10 +29,15 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
   </ItemGroup>
 
-  <!-- For the system-wide focus detection we reuse the managed UI Automation client; this
-       makes UIAutomationClient/Types available without pulling in the WPF render stack. -->
+  <!-- System-wide focus detection uses the *native* UI Automation client (IUIAutomation).
+       The managed System.Windows.Automation wrapper is frozen at UIA2 and lacks the
+       TextEdit and LegacyIAccessible signals we need to classify editable fields in
+       browsers/Electron apps; the native COM API exposes them, plus the IUIAutomation6
+       reliability knobs. Interop.UIAutomationClient is a tlbimp'd interop assembly
+       (namespace Interop.UIAutomationClient) referenced by dotnet build without the
+       .NET-Framework-only COMReference/ResolveComReference task. -->
   <ItemGroup>
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <PackageReference Include="Interop.UIAutomationClient" Version="10.19041.0" />
   </ItemGroup>
 
   <ItemGroup>
