@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO;
-using System.Windows.Automation;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -92,26 +91,5 @@ public class StartupPerformanceTests(ITestOutputHelper output)
         output.WriteLine($"Target: < {TargetMs} ms");
 
         Assert.True(avg < TargetMs, $"Average startup ({avg} ms) exceeds {TargetMs} ms target.");
-    }
-
-    [Fact]
-    public void UIAutomation_AddFocusChangedHandler_MeasureRegistrationTime()
-    {
-        AutomationFocusChangedEventHandler handler = (s, e) => { };
-
-        var sw = Stopwatch.StartNew();
-        Automation.AddAutomationFocusChangedEventHandler(handler);
-        sw.Stop();
-
-        long registrationMs = sw.ElapsedMilliseconds;
-
-        // Clean up
-        try { Automation.RemoveAutomationFocusChangedEventHandler(handler); } catch { }
-
-        output.WriteLine($"UIA registration time: {registrationMs} ms");
-
-        // Warn if this alone is eating most of the 2s startup budget.
-        Assert.True(registrationMs < TargetMs,
-            $"Automation.AddAutomationFocusChangedEventHandler took {registrationMs} ms — this alone exceeds the {TargetMs} ms startup target.");
     }
 }

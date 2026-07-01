@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Win32;
@@ -20,15 +22,12 @@ public class MainWindow : Window
     // --- Win32 interop -------------------------------------------------------
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_NOACTIVATE = 0x08000000;
-    private const int WS_EX_TOOLWINDOW = 0x00000080;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010;
 
     [DllImport("user32.dll")] static extern IntPtr GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern IntPtr SetWindowLong(IntPtr h, int i, IntPtr v);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
-    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
-    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     [DllImport("psapi.dll")] static extern int EmptyWorkingSet(IntPtr h);
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] p, int cb);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
@@ -36,12 +35,12 @@ public class MainWindow : Window
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     private const uint GA_ROOT = 2;
 
-    private static void TrimWorkingSet() { try { EmptyWorkingSet(GetCurrentProcess()); } catch { } }
+    // -1 = the GetCurrentProcess pseudo-handle
+    private static void TrimWorkingSet() { try { EmptyWorkingSet(new IntPtr(-1)); } catch { } }
 
     private const uint INPUT_KEYBOARD = 1, KEYEVENTF_KEYUP = 0x0002;
     private const ushort VK_LSHIFT = 0xA0, VK_LCONTROL = 0xA2, VK_LMENU = 0xA4, VK_LWIN = 0x5B;
 
-    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] private struct INPUT { public uint type; public KEYBDINPUT ki; public int _a, _b; }
     [StructLayout(LayoutKind.Sequential)]
     private struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr extra; }
@@ -53,21 +52,26 @@ public class MainWindow : Window
     private double currentHue, currentSat, currentOpacity = 1.0, currentBrightness = 1.0;
     private int currentSizeState = 1, currentLayoutState = 0;
 
-    private static readonly IBrush ActiveBrush = new ImmutableSolidColorBrush(Color.FromRgb(74, 144, 226));
-    private static readonly IBrush LockBrush = new ImmutableSolidColorBrush(Color.FromRgb(210, 140, 30));
-
     // --- Modifier state machine ---------------------------------------------
     private enum ModState { Off, OneShot, Locked }
-    private static readonly string[] ModTags = { "TOGGLE_SHIFT", "TOGGLE_CTRL", "TOGGLE_ALT", "TOGGLE_WIN", "TOGGLE_FN" };
-    private readonly Dictionary<string, ModState> _mod = new()
+
+    // One modifier key's state + virtual key. Vk 0 = local-only (Fn remaps rows, no real key).
+    private sealed class Mod(string tag, ushort vk)
     {
-        ["TOGGLE_SHIFT"] = ModState.Off, ["TOGGLE_CTRL"] = ModState.Off,
-        ["TOGGLE_ALT"] = ModState.Off, ["TOGGLE_WIN"] = ModState.Off, ["TOGGLE_FN"] = ModState.Off,
-    };
+        public readonly string Tag = tag;
+        public readonly ushort Vk = vk;
+        public ModState State;
+    }
+
+    private readonly Mod _ctrl = new("TOGGLE_CTRL", VK_LCONTROL), _alt = new("TOGGLE_ALT", VK_LMENU),
+                         _shift = new("TOGGLE_SHIFT", VK_LSHIFT), _win = new("TOGGLE_WIN", VK_LWIN),
+                         _fn = new("TOGGLE_FN", 0);
+    private readonly Mod[] _mods;   // also SendKey's wrap order: one-shots go down in this order, up in reverse
+    private Mod? GetMod(string tag) => Array.Find(_mods, m => m.Tag == tag);
 
     private readonly DispatcherTimer _longPressTimer = new() { Interval = TimeSpan.FromMilliseconds(300) };
-    private string? _longPressTag;
-    private bool _longPressActive, _longPressFired;
+    private Mod? _longPress;
+    private bool _longPressFired;
 
     // Auto-repeat for a held normal key (typematic): initial delay then fast repeat.
     private readonly DispatcherTimer _repeatTimer = new();
@@ -77,8 +81,7 @@ public class MainWindow : Window
     private enum KeyboardMode { Auto, Show, Hide }
     private KeyboardMode currentMode = KeyboardMode.Auto;
     private Border _modeBg = null!;       // the mode button, a child of this window (no 2nd window)
-    private TextBlock? _modeText;
-    private TextBlock[] _modeOutline = Array.Empty<TextBlock>();
+    private OutlinedText _modeLabel = null!;
     private const double ModeBtnW = 96, ModeBtnH = 32;
     private bool _modeDragging;
     private int _modeDownX, _modeDownY;   // screen pos where a press started (tap vs drag)
@@ -91,14 +94,7 @@ public class MainWindow : Window
     private PixelPoint _modeAnchor;     // screen px the mode-button centre is pinned to
     private bool _bodyVisible;          // are the keys shown (vs. just the top row)
     private bool _focusEditable;        // last UIA focus classification (Auto mode)
-    private UIA.IUIAutomation? _uia;    // native UIA client, created/owned by the MTA thread
     private FocusHandler? _focusHandler; // roots the COM focus-event sink for the app's lifetime
-
-    // Focus-detection diagnostics (gated by the same Diag flag as the perf log). Written
-    // from the MTA focus thread + UIA callback threads, so it needs its own locked file.
-    private static bool _diagFocus;
-    private static string? _focusLogPath;
-    private static readonly object _focusLogLock = new();
     private bool _chromeExpanded = true; // Esc + theme/layout/close shown (vs. collapsed behind the toggle)
     private StackPanel _bodyRow = null!;          // keyboard + numpad; collapses when hidden
     private Key _escKey = null!;
@@ -109,18 +105,12 @@ public class MainWindow : Window
     private bool runOnStartup, _loading, _settingsLoaded;
     private long _suppressHideUntil;
 
-    private const string SettingsKey = @"Software\serifpersia\DesktopKeyboard";
+    internal const string SettingsKey = @"Software\serifpersia\DesktopKeyboard";
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "DesktopKeyboard";
 
     private readonly DispatcherTimer _hideTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly DispatcherTimer _saveTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
-
-    // Opt-in perf log (registry "Diag"=1 or env DESKTOPKEYBOARD_DIAG=1).
-    private DispatcherTimer? _perfTimer;
-    private TimeSpan _perfLastCpu;
-    private long _perfLastTick;
-    private string? _perfLogPath;
 
     // --- UI references -------------------------------------------------------
     private Border _mainBorder = null!;
@@ -136,6 +126,7 @@ public class MainWindow : Window
     public MainWindow(IClassicDesktopStyleApplicationLifetime desktop)
     {
         _desktop = desktop;
+        _mods = new[] { _ctrl, _alt, _shift, _win, _fn };
 
         SystemDecorations = SystemDecorations.None;
         TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
@@ -161,11 +152,12 @@ public class MainWindow : Window
 
         Dispatcher.UIThread.Post(() =>
         {
+            Diag.Init();
             Show();                     // always visible; shrinks to the mode button when hidden
             InitDefaultPosition();
             LoadSettings();
             UpdateGeometry();
-            StartPerfLog();
+            Diag.StartPerfLog(() => _bodyVisible);
         }, DispatcherPriority.Loaded);
 
         Dispatcher.UIThread.Post(() =>
@@ -186,22 +178,24 @@ public class MainWindow : Window
         for (int i = 0; i < 5; i++) _numpadGrid.RowDefinitions.Add(new RowDefinition(new GridLength(U)));
         for (int i = 0; i < 4; i++) _numpadGrid.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U)));
 
-        _bodyRow = new StackPanel { Orientation = Orientation.Horizontal };
-        _bodyRow.Children.Add(BuildKeyboard());
-        _bodyRow.Children.Add(BuildNav());
-        _bodyRow.Children.Add(_numpadGrid);
-
-        var stack = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(8) };
-        stack.Children.Add(BuildTopBar());
-        stack.Children.Add(_bodyRow);
+        _bodyRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Children = { BuildKeyboard(), BuildNav(), _numpadGrid },
+        };
 
         _mainBorder = new Border
         {
             Background = new ImmutableSolidColorBrush(Color.FromRgb(0x11, 0x11, 0x11)),
             CornerRadius = new CornerRadius(8),
-            BorderBrush = new ImmutableSolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
+            BorderBrush = Palette.Outline,
             BorderThickness = new Thickness(1),
-            Child = stack,
+            Child = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                Margin = new Thickness(8),
+                Children = { BuildTopBar(), _bodyRow },
+            },
         };
 
         _scaler = new LayoutTransformControl { LayoutTransform = _scale, Child = _mainBorder };
@@ -211,25 +205,16 @@ public class MainWindow : Window
     // Builds the mode button (a top-row cell). Tap cycles the mode; drag moves the window.
     private Control BuildModeButton()
     {
-        _modeText = MakeModeLabel(Brushes.White, 0, 0);
-        _modeOutline = new[]
-        {
-            MakeModeLabel(Brushes.Black, -1, -1), MakeModeLabel(Brushes.Black, 1, -1),
-            MakeModeLabel(Brushes.Black, -1, 1), MakeModeLabel(Brushes.Black, 1, 1),
-        };
-        var labelGrid = new Grid();
-        foreach (var t in _modeOutline) labelGrid.Children.Add(t);
-        labelGrid.Children.Add(_modeText);
-
+        _modeLabel = new OutlinedText("Auto", 15, FontWeight.SemiBold);
         _modeBg = new Border
         {
             CornerRadius = new CornerRadius(6),
-            Background = new ImmutableSolidColorBrush(Color.FromRgb(0x25, 0x25, 0x25)),
+            Background = Palette.Button,
             Cursor = new Cursor(StandardCursorType.Hand),
             Width = ModeBtnW,
             Height = ModeBtnH,
             VerticalAlignment = VerticalAlignment.Center,
-            Child = labelGrid,
+            Child = _modeLabel,
         };
 
         // Tap cycles the mode; drag moves the whole window (works shown or collapsed).
@@ -283,21 +268,20 @@ public class MainWindow : Window
 
         var themeBtn = ChromeButton("🎨", 16, () => _themePopup.IsOpen = !_themePopup.IsOpen);
         var layoutBtn = ChromeButton("⌨", 16, () => { SetLayout((currentLayoutState + 1) % 2); SaveSettings(); });
-        var closeBtn = ChromeButton("✕", 20, RequestClose);
-        _chromeGroup = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        _chromeGroup.Children.Add(themeBtn);
-        _chromeGroup.Children.Add(layoutBtn);
-        _chromeGroup.Children.Add(closeBtn);
+        _chromeGroup = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { themeBtn, layoutBtn, ChromeButton("✕", 20, RequestClose) },
+        };
 
         var cluster = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
+            Children = { mode, toggle, _chromeGroup },
         };
-        cluster.Children.Add(mode);
-        cluster.Children.Add(toggle);
-        cluster.Children.Add(_chromeGroup);
 
         bar.Children.Add(cluster);   // centred
         bar.Children.Add(_escKey);   // left, overlaid
@@ -352,38 +336,37 @@ public class MainWindow : Window
         _opacityLabel = Label("Background opacity: 100%");
         _sizeLabel = Label("Size: Medium");
 
-        var stack = new StackPanel { Width = 340 };
-        stack.Children.Add(Label("Colour"));
-        stack.Children.Add(_hueSlider);
-        stack.Children.Add(_brightnessLabel);
-        stack.Children.Add(_brightnessSlider);
-        stack.Children.Add(_opacityLabel);
-        stack.Children.Add(_opacitySlider);
-        stack.Children.Add(_sizeLabel);
-        stack.Children.Add(_sizeSlider);
-
         var reset = ChromeButton("Reset to grey", 16, () =>
         {
             _hueSlider.Value = 0; currentHue = 0; currentSat = 0; ApplyTheme(); SaveSettings();
         });
-        reset.Background = new ImmutableSolidColorBrush(Color.FromRgb(0x25, 0x25, 0x25));
+        reset.Background = Palette.Button;
         reset.Height = 44; reset.Margin = new Thickness(0, 12, 0, 0);
 
         var startup = ChromeButton("Run on startup: Off", 16, () => { SetRunOnStartup(!runOnStartup); SaveSettings(); });
-        startup.Background = new ImmutableSolidColorBrush(Color.FromRgb(0x25, 0x25, 0x25));
+        startup.Background = Palette.Button;
         startup.Height = 44; startup.Margin = new Thickness(0, 8, 0, 0);
         _startupText = (TextBlock)startup.Child!;
-        stack.Children.Add(reset);
-        stack.Children.Add(startup);
 
         return new Border
         {
-            Background = new ImmutableSolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E)),
+            Background = Palette.Panel,
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(16),
-            BorderBrush = new ImmutableSolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
+            BorderBrush = Palette.Outline,
             BorderThickness = new Thickness(1),
-            Child = stack,
+            Child = new StackPanel
+            {
+                Width = 340,
+                Children =
+                {
+                    Label("Colour"), _hueSlider,
+                    _brightnessLabel, _brightnessSlider,
+                    _opacityLabel, _opacitySlider,
+                    _sizeLabel, _sizeSlider,
+                    reset, startup,
+                },
+            },
         };
     }
 
@@ -470,10 +453,12 @@ public class MainWindow : Window
         Place(arrows, MakeKey("DOWN", "↓", 22), 1, 1);
         Place(arrows, MakeKey("RIGHT", "→", 22), 1, 2);
 
-        var nav = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(6, 0, 0, 0) };
-        nav.Children.Add(top);
-        nav.Children.Add(arrows);
-        return nav;
+        return new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            Margin = new Thickness(6, 0, 0, 0),
+            Children = { top, arrows },
+        };
     }
 
     private static void Place(Grid g, Key k, int row, int col) { Grid.SetRow(k, row); Grid.SetColumn(k, col); g.Children.Add(k); }
@@ -570,7 +555,7 @@ public class MainWindow : Window
     {
         if (_saveTimer.IsEnabled) { _saveTimer.Stop(); SaveSettingsNow(); }
         // Release any physically-held locked modifiers so they don't stick after exit.
-        foreach (var t in ModTags) if (_mod[t] == ModState.Locked) SetModState(t, ModState.Off);
+        foreach (var m in _mods) if (m.State == ModState.Locked) SetModState(m, ModState.Off);
         base.OnClosing(e);
     }
 
@@ -579,12 +564,10 @@ public class MainWindow : Window
         if (h != IntPtr.Zero) SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
     }
 
-    private static void NoActivate(IntPtr h, bool toolWindow = false)
+    private static void NoActivate(IntPtr h)
     {
         if (h == IntPtr.Zero) return;
-        long ex = GetWindowLong(h, GWL_EXSTYLE).ToInt64() | WS_EX_NOACTIVATE;
-        if (toolWindow) ex |= WS_EX_TOOLWINDOW;
-        SetWindowLong(h, GWL_EXSTYLE, new IntPtr(ex));
+        SetWindowLong(h, GWL_EXSTYLE, new IntPtr(GetWindowLong(h, GWL_EXSTYLE).ToInt64() | WS_EX_NOACTIVATE));
         MakeTopmost(h);
     }
 
@@ -594,99 +577,18 @@ public class MainWindow : Window
     // STA UI thread, or event delivery/unregistration can misbehave.
     private void RegisterFocusTracking()
     {
-        _diagFocus = DiagEnabled();
-        if (_diagFocus)
-            _focusLogPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "DesktopKeyboard_focus.log");
-
         var thread = new Thread(FocusTrackingThreadProc) { IsBackground = true, Name = "UIAFocusTracking" };
         thread.SetApartmentState(ApartmentState.MTA);
         thread.Start();
-    }
-
-    // Appends one line to the focus log when Diag is on. Safe from any thread; a no-op
-    // (and near-zero cost) otherwise.
-    private static void FocusLog(string msg)
-    {
-        if (!_diagFocus || _focusLogPath == null) return;
-        try
-        {
-            lock (_focusLogLock)
-                System.IO.File.AppendAllText(_focusLogPath,
-                    $"{DateTime.Now:HH:mm:ss.fff} [t{Environment.CurrentManagedThreadId}] {msg}{Environment.NewLine}");
-        }
-        catch { }
-    }
-
-    // Last-write time of the running assembly — lets the log prove which binary is live,
-    // so a stale install (MSI skipping same-version file replacement) is obvious.
-    private static string BuildStamp()
-    {
-        try
-        {
-            string loc = System.Reflection.Assembly.GetExecutingAssembly().Location;
-            return string.IsNullOrEmpty(loc) ? "?" : System.IO.File.GetLastWriteTime(loc).ToString("yyyy-MM-dd HH:mm:ss");
-        }
-        catch { return "?"; }
-    }
-
-    private static string CtName(int ct) => ct switch
-    {
-        (int)UIA.UIA_ControlTypeIds.UIA_EditControlTypeId => "Edit",
-        (int)UIA.UIA_ControlTypeIds.UIA_ComboBoxControlTypeId => "ComboBox",
-        (int)UIA.UIA_ControlTypeIds.UIA_DocumentControlTypeId => "Document",
-        (int)UIA.UIA_ControlTypeIds.UIA_TextControlTypeId => "Text",
-        (int)UIA.UIA_ControlTypeIds.UIA_ButtonControlTypeId => "Button",
-        (int)UIA.UIA_ControlTypeIds.UIA_HyperlinkControlTypeId => "Hyperlink",
-        (int)UIA.UIA_ControlTypeIds.UIA_ListItemControlTypeId => "ListItem",
-        (int)UIA.UIA_ControlTypeIds.UIA_PaneControlTypeId => "Pane",
-        (int)UIA.UIA_ControlTypeIds.UIA_GroupControlTypeId => "Group",
-        (int)UIA.UIA_ControlTypeIds.UIA_CustomControlTypeId => "Custom",
-        _ => "ct#" + ct,
-    };
-
-    // Full signal snapshot for one focused element (event path only, so it never spams).
-    private static string SnapshotSignals(UIA.IUIAutomationElement el)
-    {
-        int ct = SafeCt(el);
-        string name = "";
-        try { name = el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_NamePropertyId) as string ?? ""; } catch { }
-        if (name.Length > 40) name = name[..40] + "…";
-        bool enabled = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsEnabledPropertyId, true);
-        bool pwd = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsPasswordPropertyId);
-        bool hasVal = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsValuePatternAvailablePropertyId);
-        bool valRo = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_ValueIsReadOnlyPropertyId);
-        bool hasTe = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsTextEditPatternAvailablePropertyId);
-        bool hasLeg = GetCachedBool(el, (int)UIA.UIA_PropertyIds.UIA_IsLegacyIAccessiblePatternAvailablePropertyId);
-        int role = -1, state = -1;
-        try { if (el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleRolePropertyId) is int r) role = r; } catch { }
-        try { if (el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleStatePropertyId) is int s) state = s; } catch { }
-        return $"  signals: ct={CtName(ct)} name=\"{name}\" enabled={enabled} pwd={pwd} " +
-               $"value={hasVal}(ro={valRo}) textEdit={hasTe} legacy={hasLeg}(role=0x{role:X} state=0x{state:X}) " +
-               $"hostClass=\"{GetHostClass(el)}\"";
-    }
-
-    private static int SafeCt(UIA.IUIAutomationElement el)
-    {
-        try { return (int)el.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_ControlTypePropertyId); }
-        catch { return -1; }
     }
 
     // Property IDs cached on every focused element (one cross-process fetch per focus
     // change) so classification below is a pure local read — no per-property round trips.
     private static readonly int[] _cacheProps =
     {
-        (int)UIA.UIA_PropertyIds.UIA_ControlTypePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_NamePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_IsEnabledPropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_IsPasswordPropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_IsValuePatternAvailablePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_ValueIsReadOnlyPropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_IsTextEditPatternAvailablePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_IsLegacyIAccessiblePatternAvailablePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleRolePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleStatePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_NativeWindowHandlePropertyId,
-        (int)UIA.UIA_PropertyIds.UIA_ProcessIdPropertyId,
+        Prop.ControlType, Prop.Name, Prop.Enabled, Prop.Password,
+        Prop.HasValue, Prop.ValueReadOnly, Prop.HasTextEdit,
+        Prop.HasLegacy, Prop.LegacyRole, Prop.LegacyState, Prop.Hwnd, Prop.Pid,
     };
 
     // True when the focused element belongs to our own keyboard window. Tapping a key can
@@ -694,13 +596,8 @@ public class MainWindow : Window
     // would hide the keyboard mid-type, so these focus changes must be ignored outright.
     private static bool IsOwnProcess(UIA.IUIAutomationElement element)
     {
-        try
-        {
-            object p = element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_ProcessIdPropertyId);
-            int pid = p switch { int i => i, long l => (int)l, _ => 0 };
-            return pid != 0 && pid == Environment.ProcessId;
-        }
-        catch { return false; }
+        int pid = GetCachedInt(element, Prop.Pid);
+        return pid != 0 && pid == Environment.ProcessId;
     }
 
     // Console/terminal hosts draw their own text and expose no editable UIA signal, so
@@ -714,14 +611,13 @@ public class MainWindow : Window
 
     private void FocusTrackingThreadProc()
     {
-        FocusLog($"=== focus tracking start (native UIA) pid={Environment.ProcessId} built={BuildStamp()} ===");
+        Diag.Focus($"=== focus tracking start (native UIA) pid={Environment.ProcessId} built={Diag.BuildStamp()} ===");
 
         UIA.IUIAutomation uia;
         UIA.IUIAutomationCacheRequest cache;
         try
         {
             uia = (UIA.IUIAutomation)new UIA.CUIAutomation8();
-            FocusLog("CUIAutomation8 created");
 
             // IUIAutomation6 (Win10 1809+) hardens the shared event pipe: recover the
             // connection if a provider crashes, and coalesce event storms instead of
@@ -732,24 +628,21 @@ public class MainWindow : Window
                 {
                     uia6.ConnectionRecoveryBehavior = UIA.ConnectionRecoveryBehaviorOptions.ConnectionRecoveryBehaviorOptions_Enabled;
                     uia6.CoalesceEvents = UIA.CoalesceEventsOptions.CoalesceEventsOptions_Enabled;
-                    FocusLog("IUIAutomation6 reliability knobs enabled");
                 }
-                catch (Exception ex) { FocusLog("IUIAutomation6 knobs failed: " + ex.Message); }
+                catch (Exception ex) { Diag.Focus("IUIAutomation6 knobs failed: " + ex.Message); }
             }
-            else FocusLog("IUIAutomation6 not available");
 
             cache = uia.CreateCacheRequest();
             foreach (int p in _cacheProps) cache.AddProperty(p);
 
-            _uia = uia;
             _focusHandler = new FocusHandler(this);
             uia.AddFocusChangedEventHandler(cache, _focusHandler);
-            FocusLog("focus-changed handler registered — waiting for events");
+            Diag.Focus("focus-changed handler registered — waiting for events");
         }
         catch (Exception ex)
         {
             // no UIA available — auto mode silently degrades to manual
-            FocusLog("COM init FAILED (auto show/hide disabled): " + ex);
+            Diag.Focus("COM init FAILED (auto show/hide disabled): " + ex);
             return;
         }
 
@@ -757,32 +650,13 @@ public class MainWindow : Window
         // tree not yet warmed up, a dropped WinEvent, another process's UIA provider
         // stalling the shared event pipe) so periodically reconcile against the actual
         // focused element rather than trusting the event alone.
-        bool firstPoll = true;
-        bool lastEditable = false;
-        int lastCt = int.MinValue;
         while (true)
         {
             if (currentMode == KeyboardMode.Auto)
             {
-                try
-                {
-                    var fe = uia.GetFocusedElementBuildCache(cache);
-                    if (fe != null && !IsOwnProcess(fe))
-                    {
-                        bool editable = IsEditableTextField(fe, out string reason);
-                        int ct = SafeCt(fe);
-                        // Only log when the picture changes, so the 1 Hz poll doesn't flood.
-                        if (firstPoll || editable != lastEditable || ct != lastCt)
-                        {
-                            FocusLog($"[poll] ct={CtName(ct)} editable={editable} ({reason})");
-                            firstPoll = false; lastEditable = editable; lastCt = ct;
-                        }
-                        Dispatcher.UIThread.Post(() => ApplyFocusVisibility(editable));
-                    }
-                }
-                catch (Exception ex) { FocusLog("[poll] error: " + ex.Message); }
+                try { ClassifyAndApply(uia.GetFocusedElementBuildCache(cache), "poll", dedupLog: true); }
+                catch (Exception ex) { Diag.Focus("[poll] error: " + ex.Message); }
             }
-
             Thread.Sleep(1000);
         }
     }
@@ -792,21 +666,36 @@ public class MainWindow : Window
     {
         public void HandleFocusChangedEvent(UIA.IUIAutomationElement? sender)
         {
-            if (sender == null) { FocusLog("[event] sender=null"); return; }
-            if (owner.currentMode != KeyboardMode.Auto) { FocusLog("[event] ignored (mode != Auto)"); return; }
-            if (IsOwnProcess(sender)) { FocusLog("[event] ignored (own keyboard window)"); return; }
-
-            bool editable;
-            try
-            {
-                if (_diagFocus) FocusLog("[event]" + Environment.NewLine + SnapshotSignals(sender));
-                editable = IsEditableTextField(sender, out string reason);
-                FocusLog($"[event] -> editable={editable} ({reason})");
-            }
-            catch (Exception ex) { FocusLog("[event] error: " + ex.Message); return; }
-
-            Dispatcher.UIThread.Post(() => owner.ApplyFocusVisibility(editable));
+            if (owner.currentMode != KeyboardMode.Auto) return;
+            if (Diag.On && sender != null) Diag.Focus("[event]" + Environment.NewLine + Diag.Snapshot(sender));
+            owner.ClassifyAndApply(sender, "event");
         }
+    }
+
+    // Shared tail of the event and poll paths: classify a cached element that isn't our own
+    // window, then post the show/hide decision to the UI thread. dedupLog makes the 1 Hz
+    // poll only log when the picture changes, so it doesn't flood the focus log.
+    private bool? _lastPollEditable;
+    private int _lastPollCt = int.MinValue;
+    private void ClassifyAndApply(UIA.IUIAutomationElement? element, string source, bool dedupLog = false)
+    {
+        if (element == null) { if (!dedupLog) Diag.Focus($"[{source}] sender=null"); return; }
+        if (IsOwnProcess(element)) { if (!dedupLog) Diag.Focus($"[{source}] ignored (own keyboard window)"); return; }
+
+        bool editable;
+        string reason;
+        try { editable = IsEditableTextField(element, out reason); }
+        catch (Exception ex) { Diag.Focus($"[{source}] error: {ex.Message}"); return; }
+
+        if (Diag.On)
+        {
+            int ct = GetCachedInt(element, Prop.ControlType, -1);
+            if (!dedupLog || editable != _lastPollEditable || ct != _lastPollCt)
+                Diag.Focus($"[{source}] ct={Diag.CtName(ct)} -> editable={editable} ({reason})");
+            if (dedupLog) { _lastPollEditable = editable; _lastPollCt = ct; }
+        }
+
+        Dispatcher.UIThread.Post(() => ApplyFocusVisibility(editable));
     }
 
     private void ApplyFocusVisibility(bool editable)
@@ -815,12 +704,12 @@ public class MainWindow : Window
         {
             _hideTimer.Stop();
             _focusEditable = true;
-            if (!_bodyVisible) { FocusLog("[apply] editable -> SHOW"); UpdateGeometry(); }
+            if (!_bodyVisible) { Diag.Focus("[apply] editable -> SHOW"); UpdateGeometry(); }
         }
         else if (_bodyVisible)
         {
             if (Environment.TickCount64 < _suppressHideUntil) return;
-            FocusLog("[apply] not editable -> start hide timer");
+            Diag.Focus("[apply] not editable -> start hide timer");
             _hideTimer.Start();
         }
     }
@@ -830,64 +719,39 @@ public class MainWindow : Window
     private const int STATE_SYSTEM_UNAVAILABLE = 0x1;
     private const int STATE_SYSTEM_READONLY = 0x40;
 
+    // Control types that never take text entry. Slider/ProgressBar are here specifically
+    // because they expose a (settable) ValuePattern and would otherwise false-positive at
+    // rule 4 below.
+    private static readonly int[] HardNegativeCts =
+    {
+        Ct.Button, Ct.CheckBox, Ct.RadioButton, Ct.MenuItem, Ct.TabItem, Ct.Hyperlink,
+        Ct.Image, Ct.ScrollBar, Ct.ListItem, Ct.TreeItem, Ct.Slider, Ct.ProgressBar,
+        Ct.Menu, Ct.MenuBar, Ct.ToolBar, Ct.TitleBar, Ct.Tree, Ct.List, Ct.Tab,
+    };
+
     // Ordered strongest-and-cheapest first. Reads are all against the cached element.
     // `reason` names the rule that decided, for the diagnostic log.
     private static bool IsEditableTextField(UIA.IUIAutomationElement element, out string reason)
     {
-        int ct;
-        try { ct = (int)element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_ControlTypePropertyId); }
-        catch (Exception ex) { reason = "controltype read failed: " + ex.Message; return false; }
+        int ct = GetCachedInt(element, Prop.ControlType, -1);
+        if (ct == -1) { reason = "no control type"; return false; }
 
-        // 1. Hard negatives: control types that never take text entry. Slider/ProgressBar
-        //    are here specifically because they expose a (settable) ValuePattern and would
-        //    otherwise false-positive at step 4.
-        switch (ct)
-        {
-            case (int)UIA.UIA_ControlTypeIds.UIA_ButtonControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_CheckBoxControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_RadioButtonControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_MenuItemControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_TabItemControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_HyperlinkControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_ImageControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_ScrollBarControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_ListItemControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_TreeItemControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_SliderControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_ProgressBarControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_MenuControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_MenuBarControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_ToolBarControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_TitleBarControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_TreeControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_ListControlTypeId:
-            case (int)UIA.UIA_ControlTypeIds.UIA_TabControlTypeId:
-                reason = "rule1 hard-negative control type";
-                return false;
-        }
+        // 1. Hard negatives: control types that never take text entry.
+        if (Array.IndexOf(HardNegativeCts, ct) >= 0) { reason = "rule1 hard-negative control type"; return false; }
 
         // 2. Disabled elements can't take input (default when unsupported is enabled).
-        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsEnabledPropertyId, defaultValue: true) == false)
-        {
-            reason = "rule2 disabled";
-            return false;
-        }
+        if (!GetCachedBool(element, Prop.Enabled, defaultValue: true)) { reason = "rule2 disabled"; return false; }
 
         // 3. Password field: unambiguously editable, and often hides its ValuePattern value.
-        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsPasswordPropertyId))
-        {
-            reason = "rule3 password";
-            return true;
-        }
+        if (GetCachedBool(element, Prop.Password)) { reason = "rule3 password"; return true; }
 
         // 4. ValuePattern is the primary oracle for text-bearing controls: Core-AAM makes
         //    editable Edit/Document expose it, and IsReadOnly is authoritative (this both
         //    accepts multi-line web editors and rejects read-only inputs and page content).
-        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsValuePatternAvailablePropertyId))
+        if (GetCachedBool(element, Prop.HasValue))
         {
-            string name = element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_NamePropertyId) as string ?? "";
-            if (IsLikelyFileName(name)) { reason = "rule4 value but filename-like name"; return false; }
-            bool ro = GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_ValueIsReadOnlyPropertyId);
+            if (IsLikelyFileName(GetCachedString(element, Prop.Name))) { reason = "rule4 value but filename-like name"; return false; }
+            bool ro = GetCachedBool(element, Prop.ValueReadOnly);
             reason = ro ? "rule4 value read-only" : "rule4 value editable";
             return !ro;
         }
@@ -895,37 +759,23 @@ public class MainWindow : Window
         // 5. TextEdit pattern: raised by genuinely editable text surfaces (composition /
         //    text-edit events) — a stronger positive than plain TextPattern, which read-only
         //    documents also expose and which caused the original browser false-positives.
-        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsTextEditPatternAvailablePropertyId))
-        {
-            reason = "rule5 textedit pattern";
-            return true;
-        }
+        if (GetCachedBool(element, Prop.HasTextEdit)) { reason = "rule5 textedit pattern"; return true; }
 
         // 6. LegacyIAccessible (MSAA/IA2 bridge, rich in Chrome/Firefox): editable text is
         //    role TEXT without the read-only/unavailable state bits.
-        if (GetCachedBool(element, (int)UIA.UIA_PropertyIds.UIA_IsLegacyIAccessiblePatternAvailablePropertyId))
+        if (GetCachedBool(element, Prop.HasLegacy) &&
+            GetCachedInt(element, Prop.LegacyRole, -1) == ROLE_SYSTEM_TEXT &&
+            (GetCachedInt(element, Prop.LegacyState, -1) & (STATE_SYSTEM_READONLY | STATE_SYSTEM_UNAVAILABLE)) == 0)
         {
-            if (element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleRolePropertyId) is int role &&
-                element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleStatePropertyId) is int state &&
-                role == ROLE_SYSTEM_TEXT &&
-                (state & STATE_SYSTEM_READONLY) == 0 &&
-                (state & STATE_SYSTEM_UNAVAILABLE) == 0)
-            {
-                reason = "rule6 legacy role=TEXT";
-                return true;
-            }
+            reason = "rule6 legacy role=TEXT";
+            return true;
         }
 
         // 7. Inherent text controls that exposed no usable pattern (non-conformant
         //    providers): Edit/ComboBox mean text entry, so give the benefit of the doubt.
         //    Deliberately NOT Document — a Document with no editable signal is read-only page
-        //    content, the exact false-positive this rewrite fixes.
-        if (ct == (int)UIA.UIA_ControlTypeIds.UIA_EditControlTypeId ||
-            ct == (int)UIA.UIA_ControlTypeIds.UIA_ComboBoxControlTypeId)
-        {
-            reason = "rule7 edit/combobox fallback";
-            return true;
-        }
+        //    content, the exact false-positive this classification exists to avoid.
+        if (ct == Ct.Edit || ct == Ct.ComboBox) { reason = "rule7 edit/combobox fallback"; return true; }
 
         // 8. Console/terminal surfaces (Windows Terminal, classic conhost) draw their own
         //    text and expose NO editable UIA signal — Pane/Text control type, no Value/
@@ -939,22 +789,16 @@ public class MainWindow : Window
                 return true;
             }
 
-        reason = "default no editable signal" + (cls.Length > 0 ? " (hostClass=" + cls + ")" : "");
+        reason = "default no editable signal" + (cls.Length > 0 ? $" (hostClass={cls})" : "");
         return false;
     }
 
     // Class name of the window hosting an element: prefer the element's own native window
     // handle, falling back to the foreground window (our keyboard is WS_EX_NOACTIVATE, so
     // it never becomes foreground and can't mask the app being typed into).
-    private static string GetHostClass(UIA.IUIAutomationElement element)
+    internal static string GetHostClass(UIA.IUIAutomationElement element)
     {
-        IntPtr hwnd = IntPtr.Zero;
-        try
-        {
-            object h = element.GetCachedPropertyValue((int)UIA.UIA_PropertyIds.UIA_NativeWindowHandlePropertyId);
-            hwnd = h switch { int i => new IntPtr(i), long l => new IntPtr(l), _ => IntPtr.Zero };
-        }
-        catch { }
+        IntPtr hwnd = new(GetCachedInt(element, Prop.Hwnd));
         if (hwnd == IntPtr.Zero) hwnd = GetForegroundWindow();
         if (hwnd == IntPtr.Zero) return "";
 
@@ -968,12 +812,25 @@ public class MainWindow : Window
         return n > 0 ? new string(buf, 0, n) : "";
     }
 
-    // Reads a cached boolean; returns defaultValue when the provider doesn't supply one
-    // (GetCachedPropertyValue hands back a non-bool "not supported" sentinel in that case).
-    private static bool GetCachedBool(UIA.IUIAutomationElement element, int propertyId, bool defaultValue = false)
+    // Cached-property readers: GetCachedPropertyValue hands back a non-matching sentinel
+    // (or throws) when a provider doesn't supply the property, so fall to the default.
+    internal static bool GetCachedBool(UIA.IUIAutomationElement element, int propertyId, bool defaultValue = false)
     {
         try { return element.GetCachedPropertyValue(propertyId) is bool b ? b : defaultValue; }
         catch { return defaultValue; }
+    }
+
+    // Int-valued properties arrive as int or long depending on the provider (e.g. HWNDs).
+    internal static int GetCachedInt(UIA.IUIAutomationElement element, int propertyId, int defaultValue = 0)
+    {
+        try { return element.GetCachedPropertyValue(propertyId) switch { int i => i, long l => (int)l, _ => defaultValue }; }
+        catch { return defaultValue; }
+    }
+
+    internal static string GetCachedString(UIA.IUIAutomationElement element, int propertyId)
+    {
+        try { return element.GetCachedPropertyValue(propertyId) as string ?? ""; }
+        catch { return ""; }
     }
 
     private static bool IsLikelyFileName(string name)
@@ -1001,13 +858,6 @@ public class MainWindow : Window
     private Task<bool> ConfirmClose()
     {
         var tcs = new TaskCompletionSource<bool>();
-        var yes = ChromeButton("Close", 16, () => { });
-        var no = ChromeButton("Cancel", 16, () => { });
-        yes.Background = new ImmutableSolidColorBrush(Color.FromRgb(0x4A, 0x90, 0xE2));
-        no.Background = new ImmutableSolidColorBrush(Color.FromRgb(0x40, 0x40, 0x40));
-        yes.Width = no.Width = 90; yes.Height = no.Height = 40;
-        yes.Margin = no.Margin = new Thickness(6, 0, 6, 0);
-
         var dlg = new Window
         {
             SystemDecorations = SystemDecorations.BorderOnly,
@@ -1016,19 +866,26 @@ public class MainWindow : Window
             CanResize = false,
             Topmost = true,   // above the topmost keyboard
             WindowStartupLocation = WindowStartupLocation.CenterScreen,
-            Background = new ImmutableSolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E)),
+            Background = Palette.Panel,
         };
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
-        buttons.Children.Add(yes); buttons.Children.Add(no);
-        var panel = new StackPanel { Margin = new Thickness(16), Spacing = 16 };
-        panel.Children.Add(new TextBlock { Text = "Close Desktop Keyboard?", Foreground = Brushes.White, FontSize = 16, HorizontalAlignment = HorizontalAlignment.Center });
-        panel.Children.Add(buttons);
-        dlg.Content = panel;
+        var yes = ChromeButton("Close", 16, () => { tcs.TrySetResult(true); dlg.Close(); });
+        var no = ChromeButton("Cancel", 16, () => { tcs.TrySetResult(false); dlg.Close(); });
+        yes.Background = Palette.Accent;
+        no.Background = new ImmutableSolidColorBrush(Color.FromRgb(0x40, 0x40, 0x40));
+        yes.Width = no.Width = 90; yes.Height = no.Height = 40;
+        yes.Margin = no.Margin = new Thickness(6, 0, 6, 0);
 
-        yes.PointerReleased += (_, _) => { tcs.TrySetResult(true); dlg.Close(); };
-        no.PointerReleased += (_, _) => { tcs.TrySetResult(false); dlg.Close(); };
+        dlg.Content = new StackPanel
+        {
+            Margin = new Thickness(16),
+            Spacing = 16,
+            Children =
+            {
+                new TextBlock { Text = "Close Desktop Keyboard?", Foreground = Brushes.White, FontSize = 16, HorizontalAlignment = HorizontalAlignment.Center },
+                new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Children = { yes, no } },
+            },
+        };
         dlg.Closed += (_, _) => tcs.TrySetResult(false);
-
         dlg.Show();
         return tcs.Task;
     }
@@ -1076,7 +933,7 @@ public class MainWindow : Window
         if (full) BuildNumpad();
         _numpadGrid.IsVisible = full;   // window grows/shrinks to fit via SizeToContent
 
-        foreach (var t in ModTags) SetModState(t, ModState.Off, updateLabels: false);
+        foreach (var m in _mods) SetModState(m, ModState.Off, updateLabels: false);
         UpdateKeys();
         AnchorToMode();
     }
@@ -1102,24 +959,8 @@ public class MainWindow : Window
         UpdateModeButton();
     }
 
-    private static TextBlock MakeModeLabel(IBrush fg, double dx, double dy) => new()
-    {
-        Text = "Auto",
-        FontSize = 15,
-        FontWeight = FontWeight.SemiBold,
-        Foreground = fg,
-        HorizontalAlignment = HorizontalAlignment.Center,
-        VerticalAlignment = VerticalAlignment.Center,
-        RenderTransform = new TranslateTransform(dx, dy),
-        IsHitTestVisible = false,
-    };
-
-    private void UpdateModeButton()
-    {
-        string text = currentMode switch { KeyboardMode.Show => "Show", KeyboardMode.Hide => "Hide", _ => "Auto" };
-        if (_modeText != null) _modeText.Text = text;
-        foreach (var t in _modeOutline) t.Text = text;
-    }
+    private void UpdateModeButton() =>
+        _modeLabel.Text = currentMode switch { KeyboardMode.Show => "Show", KeyboardMode.Hide => "Hide", _ => "Auto" };
 
     // --- Theme ---------------------------------------------------------------
     private void ApplyTheme()
@@ -1170,7 +1011,7 @@ public class MainWindow : Window
         if (!_settingsLoaded) return;
         try
         {
-            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var inv = CultureInfo.InvariantCulture;
             using var key = Registry.CurrentUser.CreateSubKey(SettingsKey);
             if (key == null) return;
             key.SetValue("Hue", currentHue.ToString(inv), RegistryValueKind.String);
@@ -1228,7 +1069,7 @@ public class MainWindow : Window
     private static double ReadDouble(RegistryKey? key, string name, double fallback)
     {
         if (key?.GetValue(name) is string s &&
-            double.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v))
+            double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
             return v;
         return fallback;
     }
@@ -1262,46 +1103,6 @@ public class MainWindow : Window
         if (_startupText != null) _startupText.Text = runOnStartup ? "Run on startup: On" : "Run on startup: Off";
     }
 
-    // --- Opt-in perf logging -------------------------------------------------
-    private static bool DiagEnabled()
-    {
-        if (Environment.GetEnvironmentVariable("DESKTOPKEYBOARD_DIAG") == "1") return true;
-        try { using var k = Registry.CurrentUser.OpenSubKey(SettingsKey); return k?.GetValue("Diag") is int d && d == 1; }
-        catch { return false; }
-    }
-
-    private void StartPerfLog()
-    {
-        if (!DiagEnabled()) return;
-        _perfLogPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "DesktopKeyboard_perf.log");
-        using (var proc = Process.GetCurrentProcess()) _perfLastCpu = proc.TotalProcessorTime;
-        _perfLastTick = Environment.TickCount64;
-        PerfWrite($"--- session start (Avalonia), cores={Environment.ProcessorCount} ---");
-        _perfTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-        _perfTimer.Tick += PerfLog_Tick;
-        _perfTimer.Start();
-    }
-
-    private void PerfLog_Tick(object? sender, EventArgs e)
-    {
-        using var proc = Process.GetCurrentProcess();
-        long now = Environment.TickCount64;
-        double wallMs = now - _perfLastTick;
-        TimeSpan cpu = proc.TotalProcessorTime;
-        double cpuMs = (cpu - _perfLastCpu).TotalMilliseconds;
-        _perfLastCpu = cpu; _perfLastTick = now;
-        double cpuPct = wallMs > 0 ? cpuMs / (wallMs * Environment.ProcessorCount) * 100.0 : 0;
-        double wsMb = proc.WorkingSet64 / (1024.0 * 1024.0);
-        double gcMb = GC.GetTotalMemory(false) / (1024.0 * 1024.0);
-        PerfWrite($"cpu={cpuPct,5:F1}%  ws={wsMb,6:F1}MB  gcHeap={gcMb,5:F1}MB  visible={(_bodyVisible ? 1 : 0)}");
-    }
-
-    private void PerfWrite(string body)
-    {
-        try { System.IO.File.AppendAllText(_perfLogPath!, $"{DateTime.Now:HH:mm:ss}  {body}{Environment.NewLine}"); }
-        catch { }
-    }
-
     // --- Key input -----------------------------------------------------------
     // Keys fire on press (responsive, and enables auto-repeat); modifiers toggle on release.
     private void OnKeyPressed(Key k)
@@ -1315,7 +1116,8 @@ public class MainWindow : Window
         _suppressHideUntil = Environment.TickCount64 + 1500;
         _hideTimer.Stop();
 
-        if (_mod.ContainsKey(tag)) { StartLongPress(tag); return; }
+        var mod = GetMod(tag);
+        if (mod != null) { StartLongPress(mod); return; }
 
         // Normal key: send now, then auto-repeat while held (so Backspace/Del clear quickly).
         SendTag(tag);
@@ -1327,11 +1129,12 @@ public class MainWindow : Window
     private void OnKeyReleased(Key k)
     {
         string tag = k.KeyTag;
-        if (_mod.ContainsKey(tag))
+        var mod = GetMod(tag);
+        if (mod != null)
         {
-            StopLongPress();
-            if (_longPressFired && tag == _longPressTag) { _longPressFired = false; return; }
-            SetModState(tag, _mod[tag] == ModState.Off ? ModState.OneShot : ModState.Off);
+            _longPressTimer.Stop();
+            if (_longPressFired && mod == _longPress) { _longPressFired = false; return; }
+            SetModState(mod, mod.State == ModState.Off ? ModState.OneShot : ModState.Off);
             return;
         }
         if (_repeatTag == tag) { _repeatTimer.Stop(); _repeatTag = null; }
@@ -1340,7 +1143,7 @@ public class MainWindow : Window
     private void SendTag(string tag)
     {
         byte vk = GetVirtualKeyCode(tag);
-        if (_mod["TOGGLE_FN"] != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
+        if (_fn.State != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
         if (vk != 0) SendKey(vk);
     }
 
@@ -1360,104 +1163,80 @@ public class MainWindow : Window
     private void SendKey(byte vk)
     {
         // Only wrap ONE-SHOT modifiers here; locked ones are already physically held down.
-        bool ctrl = _mod["TOGGLE_CTRL"] == ModState.OneShot;
-        bool alt = _mod["TOGGLE_ALT"] == ModState.OneShot;
-        bool shift = _mod["TOGGLE_SHIFT"] == ModState.OneShot;
-        bool win = _mod["TOGGLE_WIN"] == ModState.OneShot;
-
         int n = 0;
-        if (ctrl) _inputBuf[n++] = KeyInput(VK_LCONTROL, false);
-        if (alt) _inputBuf[n++] = KeyInput(VK_LMENU, false);
-        if (shift) _inputBuf[n++] = KeyInput(VK_LSHIFT, false);
-        if (win) _inputBuf[n++] = KeyInput(VK_LWIN, false);
+        foreach (var m in _mods)
+            if (m.State == ModState.OneShot && m.Vk != 0) _inputBuf[n++] = KeyInput(m.Vk, false);
         _inputBuf[n++] = KeyInput(vk, false);
         _inputBuf[n++] = KeyInput(vk, true);
-        if (win) _inputBuf[n++] = KeyInput(VK_LWIN, true);
-        if (shift) _inputBuf[n++] = KeyInput(VK_LSHIFT, true);
-        if (alt) _inputBuf[n++] = KeyInput(VK_LMENU, true);
-        if (ctrl) _inputBuf[n++] = KeyInput(VK_LCONTROL, true);
+        for (int i = _mods.Length - 1; i >= 0; i--)
+            if (_mods[i].State == ModState.OneShot && _mods[i].Vk != 0) _inputBuf[n++] = KeyInput(_mods[i].Vk, true);
 
         SendInput((uint)n, _inputBuf, InputSize);
         ConsumeOneShotModifiers();
     }
 
     // --- Modifier state ------------------------------------------------------
-    private static readonly Dictionary<string, ushort> ModVk = new()
+    private void SetModState(Mod m, ModState state, bool updateLabels = true)
     {
-        ["TOGGLE_SHIFT"] = VK_LSHIFT, ["TOGGLE_CTRL"] = VK_LCONTROL,
-        ["TOGGLE_ALT"] = VK_LMENU, ["TOGGLE_WIN"] = VK_LWIN,   // Fn is local-only (no real key)
-    };
-
-    private void SetModState(string tag, ModState state, bool updateLabels = true)
-    {
-        if (!_mod.ContainsKey(tag)) return;
-        ModState old = _mod[tag];
-        _mod[tag] = state;
+        ModState old = m.State;
+        m.State = state;
 
         // Locked behaves like physically holding the key: press it down on lock, release on
         // unlock. One-shot stays virtual (wrapped per-key in SendKey).
-        if (ModVk.TryGetValue(tag, out var vk))
+        if (m.Vk != 0)
         {
-            if (state == ModState.Locked && old != ModState.Locked) SendRaw(vk, down: true);
-            else if (old == ModState.Locked && state != ModState.Locked) SendRaw(vk, down: false);
+            if (state == ModState.Locked && old != ModState.Locked) SendRaw(m.Vk, down: true);
+            else if (old == ModState.Locked && state != ModState.Locked) SendRaw(m.Vk, down: false);
         }
 
-        if (_byTag.TryGetValue(tag, out var keys))
+        if (_byTag.TryGetValue(m.Tag, out var keys))
         {
-            IBrush? ov = state switch { ModState.OneShot => ActiveBrush, ModState.Locked => LockBrush, _ => null };
+            IBrush? ov = state switch { ModState.OneShot => Palette.Accent, ModState.Locked => Palette.ModLock, _ => null };
             foreach (var k in keys) k.SetOverride(ov);
         }
 
-        if (updateLabels && (tag == "TOGGLE_SHIFT" || tag == "TOGGLE_FN")) UpdateKeys();
+        if (updateLabels && (m == _shift || m == _fn)) UpdateKeys();
     }
 
     private void ConsumeOneShotModifiers()
     {
-        foreach (var t in ModTags)
-            if (_mod[t] == ModState.OneShot) SetModState(t, ModState.Off);
+        foreach (var m in _mods)
+            if (m.State == ModState.OneShot) SetModState(m, ModState.Off);
     }
 
-    private void StartLongPress(string? tag)
+    private void StartLongPress(Mod m)
     {
-        if (tag == null) return;
-        if (_longPressActive && _longPressTag == tag) return;
-        _longPressTag = tag;
-        _longPressActive = true;
+        _longPress = m;
         _longPressFired = false;
         _longPressTimer.Stop();
         _longPressTimer.Start();
     }
 
-    private void StopLongPress()
-    {
-        _longPressActive = false;
-        _longPressTimer.Stop();
-    }
-
     private void LongPress_Tick(object? sender, EventArgs e)
     {
         _longPressTimer.Stop();
-        _longPressActive = false;
-        if (_longPressTag != null)
+        if (_longPress != null)
         {
             _longPressFired = true;
-            SetModState(_longPressTag, ModState.Locked);
+            SetModState(_longPress, ModState.Locked);
         }
     }
 
     private void UpdateKeys()
     {
-        bool isShifted = _mod["TOGGLE_SHIFT"] != ModState.Off;
-        bool isFn = _mod["TOGGLE_FN"] != ModState.Off;
+        bool isShifted = _shift.State != ModState.Off;
+        bool isFn = _fn.State != ModState.Off;
 
         foreach (var k in _allKeys)
         {
             string tag = k.KeyTag;
-            if (tag == "BACK") k.SetLabel(isFn ? "Del" : "⌫");
-            else if (isFn && FnMap.TryGetValue(tag, out var fm)) k.SetLabel(fm.Label);
-            else if (tag.Length == 1 && tag[0] is >= 'A' and <= 'Z') k.SetLabel(isShifted ? tag : LowerLetter[tag[0] - 'A']);
-            else if (tag.Length == 1 && tag[0] is >= '0' and <= '9') k.SetLabel(isShifted ? ShiftedDigit[tag[0] - '0'] : tag);
-            else if (Punct.TryGetValue(tag, out var p)) k.SetLabel(isShifted ? p.Shifted : p.Normal);
+            string label =
+                isFn && FnMap.TryGetValue(tag, out var fm) ? fm.Label :
+                tag.Length == 1 && tag[0] is >= 'A' and <= 'Z' ? (isShifted ? tag : char.ToLowerInvariant(tag[0]).ToString()) :
+                tag.Length == 1 && tag[0] is >= '0' and <= '9' ? (isShifted ? ShiftedDigit[tag[0] - '0'] : tag) :
+                Punct.TryGetValue(tag, out var p) ? (isShifted ? p.Shifted : p.Normal) :
+                k.DefaultLabel;
+            k.SetLabel(label);
         }
     }
 
@@ -1488,15 +1267,7 @@ public class MainWindow : Window
         ["BACK"] = (0x2E, "Del"),
     };
 
-    private static readonly string[] LowerLetter = BuildLowerLetters();
     private static readonly string[] ShiftedDigit = { ")", "!", "@", "#", "$", "%", "^", "&", "*", "(" };
-
-    private static string[] BuildLowerLetters()
-    {
-        var a = new string[26];
-        for (int i = 0; i < 26; i++) a[i] = ((char)('a' + i)).ToString();
-        return a;
-    }
 
     private static byte GetVirtualKeyCode(string keyTag)
     {
@@ -1507,4 +1278,47 @@ public class MainWindow : Window
         }
         return Vk.TryGetValue(keyTag, out byte v) ? v : (byte)0;
     }
+}
+
+// Int aliases for the interop UIA property / control-type enum ids (every use would
+// otherwise need an (int) cast of the full enum member name).
+internal static class Prop
+{
+    public const int ControlType = (int)UIA.UIA_PropertyIds.UIA_ControlTypePropertyId;
+    public const int Name = (int)UIA.UIA_PropertyIds.UIA_NamePropertyId;
+    public const int Enabled = (int)UIA.UIA_PropertyIds.UIA_IsEnabledPropertyId;
+    public const int Password = (int)UIA.UIA_PropertyIds.UIA_IsPasswordPropertyId;
+    public const int HasValue = (int)UIA.UIA_PropertyIds.UIA_IsValuePatternAvailablePropertyId;
+    public const int ValueReadOnly = (int)UIA.UIA_PropertyIds.UIA_ValueIsReadOnlyPropertyId;
+    public const int HasTextEdit = (int)UIA.UIA_PropertyIds.UIA_IsTextEditPatternAvailablePropertyId;
+    public const int HasLegacy = (int)UIA.UIA_PropertyIds.UIA_IsLegacyIAccessiblePatternAvailablePropertyId;
+    public const int LegacyRole = (int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleRolePropertyId;
+    public const int LegacyState = (int)UIA.UIA_PropertyIds.UIA_LegacyIAccessibleStatePropertyId;
+    public const int Hwnd = (int)UIA.UIA_PropertyIds.UIA_NativeWindowHandlePropertyId;
+    public const int Pid = (int)UIA.UIA_PropertyIds.UIA_ProcessIdPropertyId;
+}
+
+internal static class Ct
+{
+    public const int Edit = (int)UIA.UIA_ControlTypeIds.UIA_EditControlTypeId;
+    public const int ComboBox = (int)UIA.UIA_ControlTypeIds.UIA_ComboBoxControlTypeId;
+    public const int Button = (int)UIA.UIA_ControlTypeIds.UIA_ButtonControlTypeId;
+    public const int CheckBox = (int)UIA.UIA_ControlTypeIds.UIA_CheckBoxControlTypeId;
+    public const int RadioButton = (int)UIA.UIA_ControlTypeIds.UIA_RadioButtonControlTypeId;
+    public const int MenuItem = (int)UIA.UIA_ControlTypeIds.UIA_MenuItemControlTypeId;
+    public const int TabItem = (int)UIA.UIA_ControlTypeIds.UIA_TabItemControlTypeId;
+    public const int Hyperlink = (int)UIA.UIA_ControlTypeIds.UIA_HyperlinkControlTypeId;
+    public const int Image = (int)UIA.UIA_ControlTypeIds.UIA_ImageControlTypeId;
+    public const int ScrollBar = (int)UIA.UIA_ControlTypeIds.UIA_ScrollBarControlTypeId;
+    public const int ListItem = (int)UIA.UIA_ControlTypeIds.UIA_ListItemControlTypeId;
+    public const int TreeItem = (int)UIA.UIA_ControlTypeIds.UIA_TreeItemControlTypeId;
+    public const int Slider = (int)UIA.UIA_ControlTypeIds.UIA_SliderControlTypeId;
+    public const int ProgressBar = (int)UIA.UIA_ControlTypeIds.UIA_ProgressBarControlTypeId;
+    public const int Menu = (int)UIA.UIA_ControlTypeIds.UIA_MenuControlTypeId;
+    public const int MenuBar = (int)UIA.UIA_ControlTypeIds.UIA_MenuBarControlTypeId;
+    public const int ToolBar = (int)UIA.UIA_ControlTypeIds.UIA_ToolBarControlTypeId;
+    public const int TitleBar = (int)UIA.UIA_ControlTypeIds.UIA_TitleBarControlTypeId;
+    public const int Tree = (int)UIA.UIA_ControlTypeIds.UIA_TreeControlTypeId;
+    public const int List = (int)UIA.UIA_ControlTypeIds.UIA_ListControlTypeId;
+    public const int Tab = (int)UIA.UIA_ControlTypeIds.UIA_TabControlTypeId;
 }

@@ -41,7 +41,7 @@ internal sealed class TouchSlider : Panel
             Width = ThumbSize,
             Height = ThumbSize,
             CornerRadius = new CornerRadius(ThumbSize / 2),
-            Background = new ImmutableSolidColorBrush(Color.FromRgb(0x4A, 0x90, 0xE2)),
+            Background = Palette.Accent,
             BorderBrush = Brushes.White,
             BorderThickness = new Thickness(2),
             HorizontalAlignment = HorizontalAlignment.Left,

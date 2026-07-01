@@ -8,29 +8,65 @@ using Avalonia.Media.Immutable;
 
 namespace DesktopKeyboard;
 
-// One keyboard key, drawn from Borders + TextBlocks (no control theme needed):
-//   themed background  +  press-highlight (fades out on release)  +  white glyph with a
-//   1px black outline (four offset copies, no shader effect).
-// Raises Pressed/Released for the central long-press + tap logic in MainWindow.
+// Shared immutable brushes: the blue accent, the amber modifier-lock, and the chrome greys.
+internal static class Palette
+{
+    public static readonly IBrush Accent = new ImmutableSolidColorBrush(Color.FromRgb(0x4A, 0x90, 0xE2));
+    public static readonly IBrush ModLock = new ImmutableSolidColorBrush(Color.FromRgb(210, 140, 30));
+    public static readonly IBrush Panel = new ImmutableSolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
+    public static readonly IBrush Button = new ImmutableSolidColorBrush(Color.FromRgb(0x25, 0x25, 0x25));
+    public static readonly IBrush Outline = new ImmutableSolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33));
+}
+
+// White text over four 1px-offset black copies — the outline-text trick used for key glyphs
+// and the mode button label (no shader effect, which would force a slower render path).
+internal sealed class OutlinedText : Panel
+{
+    private static readonly (double X, double Y)[] Offsets = { (-1, -1), (1, -1), (-1, 1), (1, 1), (0, 0) };
+
+    public OutlinedText(string text, double fontSize, FontWeight weight = FontWeight.Normal)
+    {
+        IsHitTestVisible = false;
+        foreach (var (x, y) in Offsets)   // the (0,0) white copy is last, so it draws on top
+            Children.Add(new TextBlock
+            {
+                Text = text,
+                FontSize = fontSize,
+                FontWeight = weight,
+                Foreground = (x, y) == (0, 0) ? Brushes.White : Brushes.Black,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                RenderTransform = new TranslateTransform(x, y),
+            });
+    }
+
+    public string Text
+    {
+        set { foreach (var c in Children) ((TextBlock)c).Text = value; }
+    }
+}
+
+// One keyboard key (no control theme needed): themed background + press-highlight that
+// fades out on release + an OutlinedText glyph. Raises Pressed/Released for the central
+// long-press + tap logic in MainWindow.
 internal sealed class Key : Panel
 {
     public string KeyTag { get; }
+    public string DefaultLabel { get; }   // ctor label; UpdateKeys restores it when no remap applies
 
     private readonly Border _bg;
     private readonly Border _highlight;
-    private readonly TextBlock[] _outline = new TextBlock[4];
-    private readonly TextBlock _text;
+    private readonly OutlinedText _glyph;
     private IBrush? _themeBg;
     private IBrush? _override;
 
     public event Action<Key>? Pressed;
     public event Action<Key>? Released;
 
-    private static readonly (double X, double Y)[] Offsets = { (-1, -1), (1, -1), (-1, 1), (1, 1) };
-
     public Key(string tag, string label, double fontSize = 22)
     {
         KeyTag = tag;
+        DefaultLabel = label;
         Margin = new Thickness(3);
 
         _bg = new Border { CornerRadius = new CornerRadius(6) };
@@ -44,18 +80,11 @@ internal sealed class Key : Panel
                 new DoubleTransition { Property = OpacityProperty, Duration = TimeSpan.FromSeconds(0.12) },
             },
         };
+        _glyph = new OutlinedText(label, fontSize) { Margin = new Thickness(0, 0, 0, 3) };
 
         Children.Add(_bg);
         Children.Add(_highlight);
-
-        for (int i = 0; i < 4; i++)
-        {
-            _outline[i] = MakeGlyph(label, fontSize, Brushes.Black);
-            _outline[i].RenderTransform = new TranslateTransform(Offsets[i].X, Offsets[i].Y);
-            Children.Add(_outline[i]);
-        }
-        _text = MakeGlyph(label, fontSize, Brushes.White);
-        Children.Add(_text);
+        Children.Add(_glyph);
 
         PointerPressed += OnPressed;
         PointerReleased += OnReleased;
@@ -74,22 +103,7 @@ internal sealed class Key : Panel
         Released?.Invoke(this);
     }
 
-    private static TextBlock MakeGlyph(string label, double fontSize, IBrush fg) => new()
-    {
-        Text = label,
-        FontSize = fontSize,
-        Foreground = fg,
-        HorizontalAlignment = HorizontalAlignment.Center,
-        VerticalAlignment = VerticalAlignment.Center,
-        Margin = new Thickness(0, 0, 0, 3),
-        IsHitTestVisible = false,
-    };
-
-    public void SetLabel(string s)
-    {
-        _text.Text = s;
-        foreach (var t in _outline) t.Text = s;
-    }
+    public void SetLabel(string s) => _glyph.Text = s;
 
     // Themed grey background (from ApplyTheme). Ignored while an override is active.
     public void SetThemeBackground(IBrush b)
