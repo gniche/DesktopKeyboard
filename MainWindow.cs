@@ -169,12 +169,13 @@ public class MainWindow : Window
         // collapsible body (keyboard + optional numpad). The window sizes to this content
         // (SizeToContent), so the numpad grows the window instead of shrinking the keys, and
         // "hidden" simply collapses the body leaving the top row (with the mode button) in place.
-        _numpadGrid = new Grid { Margin = new Thickness(4, 0, 0, 0), Width = 228, Height = 290, IsVisible = false };
-        for (int i = 0; i < 5; i++) _numpadGrid.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
-        for (int i = 0; i < 4; i++) _numpadGrid.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
+        _numpadGrid = new Grid { Margin = new Thickness(6, 0, 0, 0), IsVisible = false };
+        for (int i = 0; i < 5; i++) _numpadGrid.RowDefinitions.Add(new RowDefinition(new GridLength(U)));
+        for (int i = 0; i < 4; i++) _numpadGrid.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U)));
 
         _bodyRow = new StackPanel { Orientation = Orientation.Horizontal };
         _bodyRow.Children.Add(BuildKeyboard());
+        _bodyRow.Children.Add(BuildNav());
         _bodyRow.Children.Add(_numpadGrid);
 
         var stack = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(8) };
@@ -403,49 +404,71 @@ public class MainWindow : Window
         return b;
     }
 
-    // Fixed key sizes (design units; scaled as a whole by the size preset). Rows share one
-    // width so they stay left-aligned; the window sizes to this content.
-    private const double KbW = 812, RowH = 58;
+    // One key cell = U design pixels (scaled as a whole by the size preset). Every key's width
+    // is a multiple of U, so all 1-unit keys are identical; wide keys are exact multiples.
+    private const double U = 54;
 
     private Control BuildKeyboard()
     {
         var col = new StackPanel { Orientation = Orientation.Vertical };
 
-        var num = new UniformGrid { Columns = 14, Width = KbW, Height = RowH };
-        AddTo(num, MakeKey("GRAVE", "`"), MakeKey("1", "1"), MakeKey("2", "2"), MakeKey("3", "3"),
-            MakeKey("4", "4"), MakeKey("5", "5"), MakeKey("6", "6"), MakeKey("7", "7"), MakeKey("8", "8"),
-            MakeKey("9", "9"), MakeKey("0", "0"), MakeKey("MINUS", "-"), MakeKey("EQUALS", "="), MakeKey("BACK", "⌫", 18));
-        col.Children.Add(num);
+        col.Children.Add(Row(new[] { 1.0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 },
+            MakeKey("GRAVE", "`"), MakeKey("1", "1"), MakeKey("2", "2"), MakeKey("3", "3"), MakeKey("4", "4"),
+            MakeKey("5", "5"), MakeKey("6", "6"), MakeKey("7", "7"), MakeKey("8", "8"), MakeKey("9", "9"),
+            MakeKey("0", "0"), MakeKey("MINUS", "-"), MakeKey("EQUALS", "="), MakeKey("BACK", "⌫", 18)));
 
-        col.Children.Add(Row(new[] { 1.3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.2 },
+        col.Children.Add(Row(new[] { 1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.5 },
             MakeKey("TAB", "⇥"), MakeKey("Q", "q"), MakeKey("W", "w"), MakeKey("E", "e"), MakeKey("R", "r"),
             MakeKey("T", "t"), MakeKey("Y", "y"), MakeKey("U", "u"), MakeKey("I", "i"), MakeKey("O", "o"),
             MakeKey("P", "p"), MakeKey("BACKSLASH", "\\")));
 
-        col.Children.Add(Row(new[] { 1.3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.5 },
+        col.Children.Add(Row(new[] { 1.75, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2.25 },
             MakeKey("TOGGLE_FN", "Fn", 18), MakeKey("A", "a"), MakeKey("S", "s"), MakeKey("D", "d"), MakeKey("F", "f"),
             MakeKey("G", "g"), MakeKey("H", "h"), MakeKey("J", "j"), MakeKey("K", "k"), MakeKey("L", "l"),
             MakeKey("ENTER", "↵")));
 
-        col.Children.Add(Row(new[] { 1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+        col.Children.Add(Row(new[] { 2.25, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.75 },
             MakeKey("TOGGLE_SHIFT", "⇧", 26), MakeKey("Z", "z"), MakeKey("X", "x"), MakeKey("C", "c"), MakeKey("V", "v"),
             MakeKey("B", "b"), MakeKey("N", "n"), MakeKey("M", "m"), MakeKey("COMMA", ","), MakeKey("PERIOD", "."),
-            MakeKey("SLASH", "/"), MakeKey("UP", "↑", 26), MakeKey("PGUP", "PgUp", 15), MakeKey("PGDN", "PgDn", 15)));
+            MakeKey("SLASH", "/")));
 
-        col.Children.Add(Row(new[] { 1.5, 1.5, 1.5, 5, 1, 1, 1, 1, 1 },
+        col.Children.Add(Row(new[] { 1.5, 1.5, 1.5, 7.5 },
             MakeKey("TOGGLE_CTRL", "Ctrl", 18), MakeKey("TOGGLE_WIN", "⊞", 20), MakeKey("TOGGLE_ALT", "Alt", 18),
-            MakeKey("SPACE", "Space", 18), MakeKey("LEFT", "←", 22), MakeKey("DOWN", "↓", 22), MakeKey("RIGHT", "→", 22),
-            MakeKey("HOME", "Home", 15), MakeKey("END", "End", 15)));
+            MakeKey("SPACE", "Space", 18)));
 
         return col;
     }
 
-    private static void AddTo(Panel p, params Control[] items) { foreach (var i in items) p.Children.Add(i); }
-
-    private static Grid Row(double[] widths, params Key[] keys)
+    // Nav cluster as a far-right column: PgUp/PgDn/Home/End on top, inverted-T arrows below.
+    private Control BuildNav()
     {
-        var g = new Grid { Width = KbW, Height = RowH };
-        foreach (var w in widths) g.ColumnDefinitions.Add(new ColumnDefinition(w, GridUnitType.Star));
+        var top = new Grid { HorizontalAlignment = HorizontalAlignment.Center };
+        for (int i = 0; i < 2; i++) { top.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U))); top.RowDefinitions.Add(new RowDefinition(new GridLength(U))); }
+        Place(top, MakeKey("HOME", "Home", 15), 0, 0);
+        Place(top, MakeKey("PGUP", "PgUp", 15), 0, 1);
+        Place(top, MakeKey("END", "End", 15), 1, 0);
+        Place(top, MakeKey("PGDN", "PgDn", 15), 1, 1);
+
+        var arrows = new Grid { Margin = new Thickness(0, U * 0.6, 0, 0) };
+        for (int i = 0; i < 3; i++) arrows.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U)));
+        for (int i = 0; i < 2; i++) arrows.RowDefinitions.Add(new RowDefinition(new GridLength(U)));
+        Place(arrows, MakeKey("UP", "↑", 26), 0, 1);
+        Place(arrows, MakeKey("LEFT", "←", 22), 1, 0);
+        Place(arrows, MakeKey("DOWN", "↓", 22), 1, 1);
+        Place(arrows, MakeKey("RIGHT", "→", 22), 1, 2);
+
+        var nav = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(6, 0, 0, 0) };
+        nav.Children.Add(top);
+        nav.Children.Add(arrows);
+        return nav;
+    }
+
+    private static void Place(Grid g, Key k, int row, int col) { Grid.SetRow(k, row); Grid.SetColumn(k, col); g.Children.Add(k); }
+
+    private Grid Row(double[] widths, params Key[] keys)
+    {
+        var g = new Grid { Height = U, HorizontalAlignment = HorizontalAlignment.Left };
+        foreach (var w in widths) g.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(w * U)));
         for (int i = 0; i < keys.Length; i++) { Grid.SetColumn(keys[i], i); g.Children.Add(keys[i]); }
         return g;
     }
@@ -480,7 +503,7 @@ public class MainWindow : Window
         var wa = Screens.Primary?.WorkingArea ?? new PixelRect(0, 0, 1920, 1080);
         _modeAnchor = new PixelPoint(
             wa.X + wa.Width / 2,
-            (int)(wa.Y + wa.Height - (5 * RowH) * s * rs - 40));
+            (int)(wa.Y + wa.Height - (5 * U) * s * rs - 40));
     }
 
     // Show/hide the keys + chrome; the window auto-sizes (SizeToContent), then we re-pin the
