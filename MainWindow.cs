@@ -56,10 +56,12 @@ public class MainWindow : Window
     private enum ModState { Off, OneShot, Locked }
 
     // One modifier key's state + virtual key. Vk 0 = local-only (Fn remaps rows, no real key).
+    // Keys holds the (possibly several) on-screen Key controls carrying this tag.
     private sealed class Mod(string tag, ushort vk)
     {
         public readonly string Tag = tag;
         public readonly ushort Vk = vk;
+        public readonly List<Key> Keys = new();
         public ModState State;
     }
 
@@ -83,8 +85,6 @@ public class MainWindow : Window
     private Border _modeBg = null!;       // the mode button, a child of this window (no 2nd window)
     private OutlinedText _modeLabel = null!;
     private const double ModeBtnW = 96, ModeBtnH = 32;
-    private bool _modeDragging;
-    private int _modeDownX, _modeDownY;   // screen pos where a press started (tap vs drag)
     private int _grabX, _grabY;           // pointer-to-window offset captured at drag start
 
     // --- Window / lifecycle --------------------------------------------------
@@ -102,7 +102,7 @@ public class MainWindow : Window
     private LayoutTransformControl _scaler = null!;
     private readonly ScaleTransform _scale = new(1, 1);   // size preset -> key size; window fits via SizeToContent
 
-    private bool runOnStartup, _loading, _settingsLoaded;
+    private bool runOnStartup, _settingsReady;
     private long _suppressHideUntil;
 
     internal const string SettingsKey = @"Software\serifpersia\DesktopKeyboard";
@@ -121,7 +121,6 @@ public class MainWindow : Window
     private TextBlock _startupText = null!;
 
     private readonly List<Key> _allKeys = new();
-    private readonly Dictionary<string, List<Key>> _byTag = new();
 
     public MainWindow(IClassicDesktopStyleApplicationLifetime desktop)
     {
@@ -218,34 +217,43 @@ public class MainWindow : Window
         };
 
         // Tap cycles the mode; drag moves the whole window (works shown or collapsed).
-        _modeBg.PointerPressed += (_, e) =>
-        {
-            e.Pointer.Capture(_modeBg);
-            var f = this.PointToScreen(e.GetPosition(this));
-            _modeDownX = f.X; _modeDownY = f.Y;
-            _grabX = f.X - Position.X; _grabY = f.Y - Position.Y;
-            _modeDragging = false;
-        };
-        _modeBg.PointerMoved += (_, e) =>
-        {
-            if (!ReferenceEquals(e.Pointer.Captured, _modeBg)) return;
-            var f = this.PointToScreen(e.GetPosition(this));
-            if (!_modeDragging && (Math.Abs(f.X - _modeDownX) > 6 || Math.Abs(f.Y - _modeDownY) > 6))
-                _modeDragging = true;
-            if (_modeDragging)
-            {
-                Position = new PixelPoint(f.X - _grabX, f.Y - _grabY);
-                SyncAnchorFromMode();
-            }
-        };
-        _modeBg.PointerReleased += (_, e) =>
-        {
-            e.Pointer.Capture(null);
-            if (_modeDragging) { _modeDragging = false; return; }
-            CycleMode();
-        };
-
+        AttachDrag(_modeBg, onTap: CycleMode);
         return _modeBg;
+    }
+
+    // Manual window drag for a control. BeginMoveDrag uses the OS move-loop, which a
+    // WS_EX_NOACTIVATE window can't enter, so we move it ourselves. An absolute grab-offset
+    // (not incremental deltas) from Avalonia's own pointer coords keeps it glued under the
+    // finger: touch withholds moves until a threshold and the OS cursor doesn't track touch.
+    // onTap != null makes a press-without-drag (within 6px) a click instead; sourceMustBeSelf
+    // ignores presses that bubbled up from a child (e.g. Esc/chrome buttons on the top bar).
+    private void AttachDrag(Control c, Action? onTap = null, bool sourceMustBeSelf = false)
+    {
+        bool dragging = false;
+        int downX = 0, downY = 0;
+        c.PointerPressed += (_, e) =>
+        {
+            if (sourceMustBeSelf && !ReferenceEquals(e.Source, c)) return;
+            e.Pointer.Capture(c);
+            var f = this.PointToScreen(e.GetPosition(this));
+            downX = f.X; downY = f.Y;
+            _grabX = f.X - Position.X; _grabY = f.Y - Position.Y;
+            dragging = onTap == null;   // no tap action -> drag from the first move
+        };
+        c.PointerMoved += (_, e) =>
+        {
+            if (!ReferenceEquals(e.Pointer.Captured, c)) return;
+            var f = this.PointToScreen(e.GetPosition(this));
+            if (!dragging && (Math.Abs(f.X - downX) > 6 || Math.Abs(f.Y - downY) > 6)) dragging = true;
+            if (dragging) { Position = new PixelPoint(f.X - _grabX, f.Y - _grabY); SyncAnchorFromMode(); }
+        };
+        c.PointerReleased += (_, e) =>
+        {
+            bool wasDragging = dragging;
+            e.Pointer.Capture(null);
+            dragging = false;
+            if (!wasDragging) onTap?.Invoke();
+        };
     }
 
     private Control BuildTopBar()
@@ -266,7 +274,7 @@ public class MainWindow : Window
 
         var toggle = ChromeButton("⋯", 18, () => SetChromeExpanded(!_chromeExpanded));
 
-        var themeBtn = ChromeButton("🎨", 16, () => _themePopup.IsOpen = !_themePopup.IsOpen);
+        var themeBtn = ChromeButton("🎨", 16, ToggleThemePopup);
         var layoutBtn = ChromeButton("⌨", 16, () => { SetLayout((currentLayoutState + 1) % 2); SaveSettings(); });
         _chromeGroup = new StackPanel
         {
@@ -286,55 +294,45 @@ public class MainWindow : Window
         bar.Children.Add(cluster);   // centred
         bar.Children.Add(_escKey);   // left, overlaid
 
+        // The heavy panel (Child) is built on first open — see ToggleThemePopup.
         _themePopup = new Popup
         {
             PlacementTarget = themeBtn,
             Placement = PlacementMode.BottomEdgeAlignedRight,
             IsLightDismissEnabled = false,
-            Child = BuildThemePanel(),
         };
         bar.Children.Add(_themePopup);
 
-        // Drag the keyboard by the empty top-bar area. BeginMoveDrag uses the OS move-loop,
-        // which a WS_EX_NOACTIVATE window can't enter, so move it manually. Use an absolute
-        // grab-offset (not incremental deltas) from Avalonia's own pointer coordinates: touch
-        // withholds moves until a drag threshold, and the OS cursor doesn't track touch — so
-        // anchoring to the grabbed window point keeps it glued under the finger regardless.
-        bar.PointerPressed += (_, e) =>
-        {
-            if (!ReferenceEquals(e.Source, bar)) return;   // ignore presses on Esc/chrome buttons
-            e.Pointer.Capture(bar);
-            var grab = this.PointToScreen(e.GetPosition(this));
-            _grabX = grab.X - Position.X;
-            _grabY = grab.Y - Position.Y;
-        };
-        bar.PointerMoved += (_, e) =>
-        {
-            if (!ReferenceEquals(e.Pointer.Captured, bar)) return;
-            var p = this.PointToScreen(e.GetPosition(this));
-            Position = new PixelPoint(p.X - _grabX, p.Y - _grabY);
-            SyncAnchorFromMode();
-        };
-        bar.PointerReleased += (_, e) => e.Pointer.Capture(null);
-
+        // Drag the keyboard by the empty top-bar area (ignore presses on Esc/chrome buttons).
+        AttachDrag(bar, sourceMustBeSelf: true);
         return bar;
     }
 
+    // The theme panel (sliders + toggles, ~20 controls) is built on first open — most sessions
+    // never touch it, so it stays off the startup path and out of the live visual tree.
+    private void ToggleThemePopup()
+    {
+        _themePopup.Child ??= BuildThemePanel();
+        _themePopup.IsOpen = !_themePopup.IsOpen;
+    }
+
+    // Built lazily by ToggleThemePopup; every control is initialised from the already-loaded
+    // theme model (LoadSettings only touches the model, never this UI).
     private Control BuildThemePanel()
     {
-        _hueSlider = new TouchSlider { Minimum = 0, Maximum = 360 };
-        _brightnessSlider = new TouchSlider { Minimum = 50, Maximum = 300, Value = 100 };
-        _opacitySlider = new TouchSlider { Minimum = 10, Maximum = 100, Value = 100 };
-        _sizeSlider = new TouchSlider { Minimum = 0, Maximum = 2, Step = 1, Value = 1 };
+        _hueSlider = new TouchSlider { Minimum = 0, Maximum = 360, Value = currentHue };
+        _brightnessSlider = new TouchSlider { Minimum = 50, Maximum = 300, Value = currentBrightness * 100.0 };
+        _opacitySlider = new TouchSlider { Minimum = 10, Maximum = 100, Value = currentOpacity * 100.0 };
+        _sizeSlider = new TouchSlider { Minimum = 0, Maximum = 2, Step = 1, Value = currentSizeState };
 
         _hueSlider.ValueChanged += v => { currentHue = v; currentSat = 0.55; ApplyTheme(); SaveSettings(); };
         _brightnessSlider.ValueChanged += v => { currentBrightness = v / 100.0; _brightnessLabel.Text = $"Brightness: {(int)v}%"; ApplyTheme(); SaveSettings(); };
         _opacitySlider.ValueChanged += v => { currentOpacity = v / 100.0; _opacityLabel.Text = $"Background opacity: {(int)v}%"; ApplyTheme(); SaveSettings(); };
         _sizeSlider.ValueChanged += v => { SetSize((int)v); SaveSettings(); };
 
-        _brightnessLabel = Label("Brightness: 100%");
-        _opacityLabel = Label("Background opacity: 100%");
-        _sizeLabel = Label("Size: Medium");
+        _brightnessLabel = Label($"Brightness: {(int)(currentBrightness * 100)}%");
+        _opacityLabel = Label($"Background opacity: {(int)(currentOpacity * 100)}%");
+        _sizeLabel = Label("Size: " + SizeName(currentSizeState));
 
         var reset = ChromeButton("Reset to grey", 16, () =>
         {
@@ -347,6 +345,7 @@ public class MainWindow : Window
         startup.Background = Palette.Button;
         startup.Height = 44; startup.Margin = new Thickness(0, 8, 0, 0);
         _startupText = (TextBlock)startup.Child!;
+        UpdateStartupButton();   // reflect the already-loaded runOnStartup state
 
         return new Border
         {
@@ -461,7 +460,13 @@ public class MainWindow : Window
         };
     }
 
-    private static void Place(Grid g, Key k, int row, int col) { Grid.SetRow(k, row); Grid.SetColumn(k, col); g.Children.Add(k); }
+    private static void Place(Grid g, Key k, int row, int col, int rowSpan = 1, int colSpan = 1)
+    {
+        Grid.SetRow(k, row); Grid.SetColumn(k, col);
+        if (rowSpan > 1) Grid.SetRowSpan(k, rowSpan);
+        if (colSpan > 1) Grid.SetColumnSpan(k, colSpan);
+        g.Children.Add(k);
+    }
 
     private Grid Row(double[] widths, params Key[] keys)
     {
@@ -478,8 +483,7 @@ public class MainWindow : Window
         k.Pressed += OnKeyPressed;
         k.Released += OnKeyReleased;
         _allKeys.Add(k);
-        if (!_byTag.TryGetValue(tag, out var list)) _byTag[tag] = list = new List<Key>();
-        list.Add(k);
+        GetMod(tag)?.Keys.Add(k);   // modifier keys also register under their Mod for highlighting
         return k;
     }
 
@@ -852,11 +856,6 @@ public class MainWindow : Window
     // --- Close confirmation --------------------------------------------------
     private async void RequestClose()
     {
-        if (await ConfirmClose()) _desktop.Shutdown();
-    }
-
-    private Task<bool> ConfirmClose()
-    {
         var tcs = new TaskCompletionSource<bool>();
         var dlg = new Window
         {
@@ -887,17 +886,19 @@ public class MainWindow : Window
         };
         dlg.Closed += (_, _) => tcs.TrySetResult(false);
         dlg.Show();
-        return tcs.Task;
+
+        if (await tcs.Task) _desktop.Shutdown();
     }
 
     // --- Size / layout -------------------------------------------------------
+    private static string SizeName(int s) => s switch { 0 => "Small", 2 => "Large", _ => "Medium" };
+
     private void SetSize(int state)
     {
         currentSizeState = state;
         _scale.ScaleX = _scale.ScaleY = state switch { 0 => 0.78, 2 => 1.3, _ => 1.0 };
         AnchorToMode();
-        if (_sizeLabel != null)
-            _sizeLabel.Text = "Size: " + (state switch { 0 => "Small", 2 => "Large", _ => "Medium" });
+        if (_sizeLabel != null) _sizeLabel.Text = "Size: " + SizeName(state);
     }
 
     private bool _numpadBuilt;
@@ -915,14 +916,7 @@ public class MainWindow : Window
         if (_numpadBuilt) return;
         _numpadBuilt = true;
         foreach (var k in NumpadKeys)
-        {
-            var key = MakeKey(k.Tag, k.C, k.FS > 0 ? k.FS : 22);
-            Grid.SetRow(key, k.R);
-            Grid.SetColumn(key, k.Col);
-            if (k.RS > 1) Grid.SetRowSpan(key, k.RS);
-            if (k.CS > 1) Grid.SetColumnSpan(key, k.CS);
-            _numpadGrid.Children.Add(key);
-        }
+            Place(_numpadGrid, MakeKey(k.Tag, k.C, k.FS > 0 ? k.FS : 22), k.R, k.Col, k.RS, k.CS);
         ApplyTheme();   // the just-created keys need their themed background applied
     }
 
@@ -1001,14 +995,14 @@ public class MainWindow : Window
     // --- Settings persistence ------------------------------------------------
     private void SaveSettings()
     {
-        if (_loading || !_settingsLoaded) return;
+        if (!_settingsReady) return;
         _saveTimer.Stop();
         _saveTimer.Start();
     }
 
     private void SaveSettingsNow()
     {
-        if (!_settingsLoaded) return;
+        if (!_settingsReady) return;
         try
         {
             var inv = CultureInfo.InvariantCulture;
@@ -1026,33 +1020,22 @@ public class MainWindow : Window
         catch (Exception ex) { Debug.WriteLine($"SaveSettings failed: {ex.Message}"); }
     }
 
+    // Populates the theme model + applies it. Deliberately touches no popup control — the
+    // theme panel may not be built yet (ToggleThemePopup builds it from these fields on demand).
     private void LoadSettings()
     {
-        _loading = true;
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(SettingsKey);
-            double savedHue = ReadDouble(key, "Hue", 0.0);
-            double savedSat = ReadDouble(key, "Sat", 0.0);
-            double savedBrightness = ReadDouble(key, "Brightness", 1.0);
-            double savedOpacity = ReadDouble(key, "Opacity", 1.0);
+            currentHue = ReadDouble(key, "Hue", 0.0);
+            currentSat = ReadDouble(key, "Sat", 0.0);
+            currentBrightness = ReadDouble(key, "Brightness", 1.0);
+            currentOpacity = ReadDouble(key, "Opacity", 1.0);
             int savedLayout = key?.GetValue("Layout") is int l ? l : 0;
             int savedSize = key?.GetValue("Size") is int sz ? sz : 1;
             int savedMode = key?.GetValue("Mode") is int m ? m : 0;
 
-            _hueSlider.Value = savedHue;
-            _brightnessSlider.Value = savedBrightness * 100.0;
-            _opacitySlider.Value = savedOpacity * 100.0;
-            _sizeSlider.Value = Math.Clamp(savedSize, 0, 2);
-
-            currentHue = savedHue;
-            currentSat = savedSat;
-            currentBrightness = savedBrightness;
-            currentOpacity = savedOpacity;
-            _brightnessLabel.Text = $"Brightness: {(int)(savedBrightness * 100)}%";
-            _opacityLabel.Text = $"Background opacity: {(int)(savedOpacity * 100)}%";
             ApplyTheme();
-
             SetLayout(Math.Clamp(savedLayout, 0, 1));
             SetSize(Math.Clamp(savedSize, 0, 2));
 
@@ -1063,7 +1046,7 @@ public class MainWindow : Window
             UpdateStartupButton();
         }
         catch (Exception ex) { Debug.WriteLine($"LoadSettings failed: {ex.Message}"); }
-        finally { _loading = false; _settingsLoaded = true; }
+        finally { _settingsReady = true; }
     }
 
     private static double ReadDouble(RegistryKey? key, string name, double fallback)
@@ -1189,11 +1172,8 @@ public class MainWindow : Window
             else if (old == ModState.Locked && state != ModState.Locked) SendRaw(m.Vk, down: false);
         }
 
-        if (_byTag.TryGetValue(m.Tag, out var keys))
-        {
-            IBrush? ov = state switch { ModState.OneShot => Palette.Accent, ModState.Locked => Palette.ModLock, _ => null };
-            foreach (var k in keys) k.SetOverride(ov);
-        }
+        IBrush? ov = state switch { ModState.OneShot => Palette.Accent, ModState.Locked => Palette.ModLock, _ => null };
+        foreach (var k in m.Keys) k.SetOverride(ov);
 
         if (updateLabels && (m == _shift || m == _fn)) UpdateKeys();
     }

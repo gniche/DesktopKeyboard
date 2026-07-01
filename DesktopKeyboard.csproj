@@ -42,8 +42,6 @@
 
   <ItemGroup>
     <Compile Remove="DesktopKeyboard.Tests\**" />
-    <Compile Remove="spike\**" />
-    <None Remove="spike\**" />
   </ItemGroup>
 
   <ItemGroup>

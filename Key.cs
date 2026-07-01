@@ -1,8 +1,8 @@
+using System.Globalization;
 using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Input;
-using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Immutable;
 
@@ -19,30 +19,60 @@ internal static class Palette
 }
 
 // White text over four 1px-offset black copies — the outline-text trick used for key glyphs
-// and the mode button label (no shader effect, which would force a slower render path).
-internal sealed class OutlinedText : Panel
+// and the mode button label. Drawn directly in one Control (cached FormattedText painted five
+// times) rather than six stacked TextBlocks, so a full keyboard is ~1 element per glyph.
+internal sealed class OutlinedText : Control
 {
-    private static readonly (double X, double Y)[] Offsets = { (-1, -1), (1, -1), (-1, 1), (1, 1), (0, 0) };
+    private static readonly (double X, double Y)[] Offsets = { (-1, -1), (1, -1), (-1, 1), (1, 1) };
+
+    private readonly double _fontSize;
+    private readonly Typeface _typeface;
+    private string _text;
+    private FormattedText? _white, _black;   // rebuilt lazily when the text changes
 
     public OutlinedText(string text, double fontSize, FontWeight weight = FontWeight.Normal)
     {
+        _text = text;
+        _fontSize = fontSize;
+        _typeface = new Typeface(FontFamily.Default, FontStyle.Normal, weight);
         IsHitTestVisible = false;
-        foreach (var (x, y) in Offsets)   // the (0,0) white copy is last, so it draws on top
-            Children.Add(new TextBlock
-            {
-                Text = text,
-                FontSize = fontSize,
-                FontWeight = weight,
-                Foreground = (x, y) == (0, 0) ? Brushes.White : Brushes.Black,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                RenderTransform = new TranslateTransform(x, y),
-            });
     }
 
     public string Text
     {
-        set { foreach (var c in Children) ((TextBlock)c).Text = value; }
+        set
+        {
+            if (_text == value) return;
+            _text = value;
+            _white = _black = null;
+            InvalidateMeasure();
+            InvalidateVisual();
+        }
+    }
+
+    private void Ensure()
+    {
+        if (_white != null) return;
+        _white = Make(Brushes.White);
+        _black = Make(Brushes.Black);
+    }
+
+    private FormattedText Make(IBrush brush) =>
+        new(_text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, _typeface, _fontSize, brush);
+
+    protected override Size MeasureOverride(Size availableSize)
+    {
+        Ensure();
+        return new Size(_white!.Width + 2, _white.Height + 2);   // +2 for the 1px outline each side
+    }
+
+    public override void Render(DrawingContext context)
+    {
+        Ensure();
+        double x = (Bounds.Width - _white!.Width) / 2;
+        double y = (Bounds.Height - _white.Height) / 2;
+        foreach (var (dx, dy) in Offsets) context.DrawText(_black!, new Point(x + dx, y + dy));
+        context.DrawText(_white, new Point(x, y));
     }
 }
 
