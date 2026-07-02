@@ -38,19 +38,38 @@ public class MainWindow : Window
     // -1 = the GetCurrentProcess pseudo-handle
     private static void TrimWorkingSet() { try { EmptyWorkingSet(new IntPtr(-1)); } catch { } }
 
-    private const uint INPUT_KEYBOARD = 1, KEYEVENTF_KEYUP = 0x0002;
-    private const ushort VK_LSHIFT = 0xA0, VK_LCONTROL = 0xA2, VK_LMENU = 0xA4, VK_LWIN = 0x5B;
+    private const uint INPUT_KEYBOARD = 1, KEYEVENTF_KEYUP = 0x0002,
+                       KEYEVENTF_EXTENDEDKEY = 0x0001, KEYEVENTF_SCANCODE = 0x0008;
+    private const ushort VK_LSHIFT = 0xA0, VK_LCONTROL = 0xA2, VK_LMENU = 0xA4, VK_LWIN = 0x5B,
+                         VK_RCONTROL = 0xA3, VK_RMENU = 0xA5;
 
     [StructLayout(LayoutKind.Sequential)] private struct INPUT { public uint type; public KEYBDINPUT ki; public int _a, _b; }
     [StructLayout(LayoutKind.Sequential)]
     private struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr extra; }
     private static readonly int InputSize = Marshal.SizeOf<INPUT>();
-    private readonly INPUT[] _inputBuf = new INPUT[10];
+    // Worst case: 6 one-shot modifier downs + key down/up + 6 modifier ups.
+    private readonly INPUT[] _inputBuf = new INPUT[16];
+
+    // Extended-bit keys (E0-prefixed scan codes) and their scans. Injected with wVk alone,
+    // RCtrl/RAlt degrade to their left variants in many apps and nav keys can be misread as
+    // numpad by scan-aware consumers, so these VKs always carry scan + KEYEVENTF_EXTENDEDKEY.
+    private static readonly Dictionary<ushort, byte> ExtScan = new()
+    {
+        [0xA3] = 0x1D /*RCtrl*/, [0xA5] = 0x38 /*RAlt*/, [0x5B] = 0x5B /*LWin*/, [0x5D] = 0x5D /*Apps*/,
+        [0x21] = 0x49 /*PgUp*/, [0x22] = 0x51 /*PgDn*/, [0x23] = 0x4F /*End*/, [0x24] = 0x47 /*Home*/,
+        [0x25] = 0x4B /*←*/, [0x26] = 0x48 /*↑*/, [0x27] = 0x4D /*→*/, [0x28] = 0x50 /*↓*/,
+        [0x2C] = 0x37 /*PrtSc*/, [0x2D] = 0x52 /*Ins*/, [0x2E] = 0x53 /*Del*/, [0x6F] = 0x35 /*Num-slash*/,
+    };
 
     // --- Theme model ---------------------------------------------------------
     private const double PanelValue = 0.067, KeyValue = 0.145, BorderValue = 0.200;
     private double currentHue, currentSat, currentOpacity = 1.0, currentBrightness = 1.0;
-    private int currentSizeState = 1, currentLayoutState = 0;
+    private int currentSizeState = 1;
+
+    // --- Arrangement (which clusters show, and on which side) ----------------
+    private enum SidePos { Off = 0, Left = 1, Right = 2 }
+    private SidePos _navPos = SidePos.Right, _numpadPos = SidePos.Off;
+    private bool _numpadOnly;
 
     // --- Modifier state machine ---------------------------------------------
     private enum ModState { Off, OneShot, Locked }
@@ -65,7 +84,10 @@ public class MainWindow : Window
         public ModState State;
     }
 
-    private readonly Mod _ctrl = new("TOGGLE_CTRL", VK_LCONTROL), _alt = new("TOGGLE_ALT", VK_LMENU),
+    // Ctrl ordered before Alt so an AltGr sent as one-shot Ctrl+Alt (if ever needed as a
+    // fallback) would sequence correctly; otherwise order only affects the wrap sequence.
+    private readonly Mod _ctrl = new("TOGGLE_CTRL", VK_LCONTROL), _rctrl = new("TOGGLE_RCTRL", VK_RCONTROL),
+                         _alt = new("TOGGLE_ALT", VK_LMENU), _ralt = new("TOGGLE_RALT", VK_RMENU),
                          _shift = new("TOGGLE_SHIFT", VK_LSHIFT), _win = new("TOGGLE_WIN", VK_LWIN),
                          _fn = new("TOGGLE_FN", 0);
     private readonly Mod[] _mods;   // also SendKey's wrap order: one-shots go down in this order, up in reverse
@@ -114,18 +136,28 @@ public class MainWindow : Window
 
     // --- UI references -------------------------------------------------------
     private Border _mainBorder = null!;
+    private Control _alphaBlock = null!;
+    private Control? _navPanel;           // built lazily; a user with nav Off never pays for it
     private Grid _numpadGrid = null!;
-    private Popup _themePopup = null!;
+    private Popup _themePopup = null!, _layoutPopup = null!;
     private TouchSlider _hueSlider = null!, _brightnessSlider = null!, _opacitySlider = null!, _sizeSlider = null!;
     private TextBlock _brightnessLabel = null!, _opacityLabel = null!, _sizeLabel = null!;
     private TextBlock _startupText = null!;
+    private Control _navSegRow = null!, _numSegRow = null!;
+    private readonly Border[] _navSegs = new Border[3], _numSegs = new Border[3];
+    private Border _numOnlyBtn = null!;
 
     private readonly List<Key> _allKeys = new();
+    private readonly Dictionary<string, KeyDef> _defByTag = new();
+
+    // --- Active Windows keyboard layout (HKL) --------------------------------
+    private IntPtr _activeHkl;      // UI thread: layout the labels currently reflect
+    private long _lastSeenHkl;      // UIA thread: last foreground HKL, to post changes once
 
     public MainWindow(IClassicDesktopStyleApplicationLifetime desktop)
     {
         _desktop = desktop;
-        _mods = new[] { _ctrl, _alt, _shift, _win, _fn };
+        _mods = new[] { _ctrl, _rctrl, _alt, _ralt, _shift, _win, _fn };
 
         SystemDecorations = SystemDecorations.None;
         TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
@@ -152,6 +184,7 @@ public class MainWindow : Window
         Dispatcher.UIThread.Post(() =>
         {
             Diag.Init();
+            _activeHkl = InputLayout.ForegroundHkl();   // before the first UpdateKeys renders labels
             Show();                     // always visible; shrinks to the mode button when hidden
             InitDefaultPosition();
             LoadSettings();
@@ -173,14 +206,16 @@ public class MainWindow : Window
         // collapsible body (keyboard + optional numpad). The window sizes to this content
         // (SizeToContent), so the numpad grows the window instead of shrinking the keys, and
         // "hidden" simply collapses the body leaving the top row (with the mode button) in place.
-        _numpadGrid = new Grid { Margin = new Thickness(6, 0, 0, 0), IsVisible = false };
+        _numpadGrid = new Grid { IsVisible = false };
         for (int i = 0; i < 5; i++) _numpadGrid.RowDefinitions.Add(new RowDefinition(new GridLength(U)));
         for (int i = 0; i < 4; i++) _numpadGrid.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U)));
 
+        // Side clusters (nav/numpad) are built lazily and re-parented by ApplyArrangement.
+        _alphaBlock = BuildKeyboard();
         _bodyRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Children = { BuildKeyboard(), BuildNav(), _numpadGrid },
+            Children = { _alphaBlock },
         };
 
         _mainBorder = new Border
@@ -275,7 +310,7 @@ public class MainWindow : Window
         var toggle = ChromeButton("⋯", 18, () => SetChromeExpanded(!_chromeExpanded));
 
         var themeBtn = ChromeButton("🎨", 16, ToggleThemePopup);
-        var layoutBtn = ChromeButton("⌨", 16, () => { SetLayout((currentLayoutState + 1) % 2); SaveSettings(); });
+        var layoutBtn = ChromeButton("⌨", 16, ToggleLayoutPopup);
         _chromeGroup = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -294,7 +329,7 @@ public class MainWindow : Window
         bar.Children.Add(cluster);   // centred
         bar.Children.Add(_escKey);   // left, overlaid
 
-        // The heavy panel (Child) is built on first open — see ToggleThemePopup.
+        // The heavy panels (Child) are built on first open — see Toggle*Popup.
         _themePopup = new Popup
         {
             PlacementTarget = themeBtn,
@@ -302,6 +337,14 @@ public class MainWindow : Window
             IsLightDismissEnabled = false,
         };
         bar.Children.Add(_themePopup);
+
+        _layoutPopup = new Popup
+        {
+            PlacementTarget = layoutBtn,
+            Placement = PlacementMode.BottomEdgeAlignedRight,
+            IsLightDismissEnabled = false,
+        };
+        bar.Children.Add(_layoutPopup);
 
         // Drag the keyboard by the empty top-bar area (ignore presses on Esc/chrome buttons).
         AttachDrag(bar, sourceMustBeSelf: true);
@@ -312,8 +355,96 @@ public class MainWindow : Window
     // never touch it, so it stays off the startup path and out of the live visual tree.
     private void ToggleThemePopup()
     {
+        bool open = !_themePopup.IsOpen;
+        CloseAllPopups();
         _themePopup.Child ??= BuildThemePanel();
-        _themePopup.IsOpen = !_themePopup.IsOpen;
+        _themePopup.IsOpen = open;
+    }
+
+    private void ToggleLayoutPopup()
+    {
+        bool open = !_layoutPopup.IsOpen;
+        CloseAllPopups();
+        _layoutPopup.Child ??= BuildLayoutPanel();
+        _layoutPopup.IsOpen = open;
+    }
+
+    private void CloseAllPopups()
+    {
+        _themePopup.IsOpen = false;
+        _layoutPopup.IsOpen = false;
+    }
+
+    // The arrangement chooser: segmented Off/Left/Right rows for the nav cluster and the
+    // numpad, plus a numpad-only toggle that overrides (and dims) both rows. Built lazily,
+    // initialised from the already-loaded arrangement fields.
+    private Control BuildLayoutPanel()
+    {
+        _navSegRow = SegRow(_navSegs, i => { _navPos = (SidePos)i; OnArrangementPicked(); });
+        _numSegRow = SegRow(_numSegs, i => { _numpadPos = (SidePos)i; OnArrangementPicked(); });
+
+        _numOnlyBtn = ChromeButton("Numpad only: Off", 16, () => { _numpadOnly = !_numpadOnly; OnArrangementPicked(); });
+        _numOnlyBtn.Height = 44;
+        _numOnlyBtn.Margin = new Thickness(0, 12, 0, 0);
+
+        RefreshLayoutPanel();
+
+        return new Border
+        {
+            Background = Palette.Panel,
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(16),
+            BorderBrush = Palette.Outline,
+            BorderThickness = new Thickness(1),
+            Child = new StackPanel
+            {
+                Width = 340,
+                Children =
+                {
+                    Label("Nav keys"), _navSegRow,
+                    Label("Numpad"), _numSegRow,
+                    _numOnlyBtn,
+                },
+            },
+        };
+    }
+
+    private Control SegRow(Border[] segs, Action<int> onPick)
+    {
+        string[] names = { "Off", "Left", "Right" };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
+        for (int i = 0; i < segs.Length; i++)
+        {
+            int pick = i;
+            var b = ChromeButton(names[i], 15, () => onPick(pick));
+            b.Width = 98; b.Height = 44;
+            segs[i] = b;
+            row.Children.Add(b);
+        }
+        return row;
+    }
+
+    private void OnArrangementPicked()
+    {
+        ApplyArrangement();
+        RefreshLayoutPanel();
+        SaveSettings();
+    }
+
+    private void RefreshLayoutPanel()
+    {
+        if (_numOnlyBtn == null) return;   // panel not built yet (arrangement set from LoadSettings)
+        for (int i = 0; i < 3; i++)
+        {
+            _navSegs[i].Background = (int)_navPos == i ? Palette.Accent : Palette.Button;
+            _numSegs[i].Background = (int)_numpadPos == i ? Palette.Accent : Palette.Button;
+        }
+        // Numpad-only overrides both rows: keep the remembered selections visible but inert.
+        double dim = _numpadOnly ? 0.45 : 1.0;
+        _navSegRow.Opacity = dim; _navSegRow.IsEnabled = !_numpadOnly;
+        _numSegRow.Opacity = dim; _numSegRow.IsEnabled = !_numpadOnly;
+        _numOnlyBtn.Background = _numpadOnly ? Palette.Accent : Palette.Button;
+        ((TextBlock)_numOnlyBtn.Child!).Text = _numpadOnly ? "Numpad only: On" : "Numpad only: Off";
     }
 
     // Built lazily by ToggleThemePopup; every control is initialised from the already-loaded
@@ -403,61 +534,82 @@ public class MainWindow : Window
     // is a multiple of U, so all 1-unit keys are identical; wide keys are exact multiples.
     private const double U = 54;
 
+    // One key slot in the base grid. Sc != 0 marks a positional key: its physical position is
+    // the scan code, and both the VK sent and the glyphs shown come from the active Windows
+    // layout (InputLayout). Sc == 0 is a fixed key: Vk-table tag + constructor label, as ever.
+    private readonly record struct KeyDef(string Tag, double W, byte Sc = 0, string? Label = null, double FS = 22);
+    private static KeyDef P(byte sc, double w = 1) => new("SC" + sc.ToString("X2"), w, sc);
+
+    // The base block: standard 60%-style physical positions, every row exactly 15 U wide.
+    private static readonly KeyDef[][] BaseRows =
+    {
+        new[] { P(0x29), P(0x02), P(0x03), P(0x04), P(0x05), P(0x06), P(0x07), P(0x08), P(0x09),
+                P(0x0A), P(0x0B), P(0x0C), P(0x0D), new KeyDef("BACK", 2, Label: "⌫", FS: 18) },
+        new[] { new KeyDef("TAB", 1.5, Label: "⇥"), P(0x10), P(0x11), P(0x12), P(0x13), P(0x14), P(0x15),
+                P(0x16), P(0x17), P(0x18), P(0x19), P(0x1A), P(0x1B), P(0x2B, 1.5) },
+        new[] { new KeyDef("TOGGLE_FN", 1.75, Label: "Fn", FS: 18), P(0x1E), P(0x1F), P(0x20), P(0x21), P(0x22),
+                P(0x23), P(0x24), P(0x25), P(0x26), P(0x27), P(0x28), new KeyDef("ENTER", 2.25, Label: "↵") },
+        new[] { new KeyDef("TOGGLE_SHIFT", 2.25, Label: "⇧", FS: 26), P(0x2C), P(0x2D), P(0x2E), P(0x2F), P(0x30),
+                P(0x31), P(0x32), P(0x33), P(0x34), P(0x35), new KeyDef("TOGGLE_SHIFT", 2.75, Label: "⇧", FS: 26) },
+        new[] { new KeyDef("TOGGLE_CTRL", 1.25, Label: "Ctrl", FS: 16), new KeyDef("TOGGLE_WIN", 1.25, Label: "⊞", FS: 20),
+                new KeyDef("TOGGLE_ALT", 1.25, Label: "Alt", FS: 16), new KeyDef("SPACE", 6.25, Label: "Space", FS: 18),
+                new KeyDef("TOGGLE_RALT", 1.25, Label: "AltGr", FS: 13), new KeyDef("LANG", 1.25, Label: "…", FS: 14),
+                new KeyDef("APPS", 1.25, Label: "☰", FS: 18), new KeyDef("TOGGLE_RCTRL", 1.25, Label: "Ctrl", FS: 16) },
+    };
+
+    // Every positional scan code in the grid — the set InputLayout builds glyph tables for.
+    private static readonly byte[] PositionalScans =
+        BaseRows.SelectMany(r => r).Where(d => d.Sc != 0).Select(d => d.Sc).ToArray();
+
     private Control BuildKeyboard()
     {
         var col = new StackPanel { Orientation = Orientation.Vertical };
-
-        col.Children.Add(Row(new[] { 1.0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 },
-            MakeKey("GRAVE", "`"), MakeKey("1", "1"), MakeKey("2", "2"), MakeKey("3", "3"), MakeKey("4", "4"),
-            MakeKey("5", "5"), MakeKey("6", "6"), MakeKey("7", "7"), MakeKey("8", "8"), MakeKey("9", "9"),
-            MakeKey("0", "0"), MakeKey("MINUS", "-"), MakeKey("EQUALS", "="), MakeKey("BACK", "⌫", 18)));
-
-        col.Children.Add(Row(new[] { 1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.5 },
-            MakeKey("TAB", "⇥"), MakeKey("Q", "q"), MakeKey("W", "w"), MakeKey("E", "e"), MakeKey("R", "r"),
-            MakeKey("T", "t"), MakeKey("Y", "y"), MakeKey("U", "u"), MakeKey("I", "i"), MakeKey("O", "o"),
-            MakeKey("P", "p"), MakeKey("BACKSLASH", "\\")));
-
-        col.Children.Add(Row(new[] { 1.75, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2.25 },
-            MakeKey("TOGGLE_FN", "Fn", 18), MakeKey("A", "a"), MakeKey("S", "s"), MakeKey("D", "d"), MakeKey("F", "f"),
-            MakeKey("G", "g"), MakeKey("H", "h"), MakeKey("J", "j"), MakeKey("K", "k"), MakeKey("L", "l"),
-            MakeKey("ENTER", "↵")));
-
-        col.Children.Add(Row(new[] { 2.25, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.75 },
-            MakeKey("TOGGLE_SHIFT", "⇧", 26), MakeKey("Z", "z"), MakeKey("X", "x"), MakeKey("C", "c"), MakeKey("V", "v"),
-            MakeKey("B", "b"), MakeKey("N", "n"), MakeKey("M", "m"), MakeKey("COMMA", ","), MakeKey("PERIOD", "."),
-            MakeKey("SLASH", "/")));
-
-        col.Children.Add(Row(new[] { 1.5, 1.5, 1.5, 7.5 },
-            MakeKey("TOGGLE_CTRL", "Ctrl", 18), MakeKey("TOGGLE_WIN", "⊞", 20), MakeKey("TOGGLE_ALT", "Alt", 18),
-            MakeKey("SPACE", "Space", 18)));
-
+        foreach (var defs in BaseRows)
+        {
+            var widths = new double[defs.Length];
+            var keys = new Key[defs.Length];
+            for (int i = 0; i < defs.Length; i++)
+            {
+                widths[i] = defs[i].W;
+                keys[i] = MakeKey(defs[i].Tag, defs[i].Label ?? "", defs[i].FS);
+                _defByTag.TryAdd(defs[i].Tag, defs[i]);   // TryAdd: TOGGLE_SHIFT appears twice
+            }
+            col.Children.Add(Row(widths, keys));
+        }
         return col;
     }
 
-    // Nav cluster as a far-right column: PgUp/PgDn/Home/End on top, inverted-T arrows below.
-    private Control BuildNav()
+    // Nav cluster (side column): Ins/Home/PgUp over Del/End/PgDn, inverted-T arrows below with
+    // PrtSc in the spare corner. Built on first use — nav can be switched Off entirely.
+    private void EnsureNavBuilt()
     {
+        if (_navPanel != null) return;
+
         var top = new Grid { HorizontalAlignment = HorizontalAlignment.Center };
-        for (int i = 0; i < 2; i++) { top.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U))); top.RowDefinitions.Add(new RowDefinition(new GridLength(U))); }
-        Place(top, MakeKey("HOME", "Home", 15), 0, 0);
-        Place(top, MakeKey("PGUP", "PgUp", 15), 0, 1);
-        Place(top, MakeKey("END", "End", 15), 1, 0);
-        Place(top, MakeKey("PGDN", "PgDn", 15), 1, 1);
+        for (int i = 0; i < 3; i++) top.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U)));
+        for (int i = 0; i < 2; i++) top.RowDefinitions.Add(new RowDefinition(new GridLength(U)));
+        Place(top, MakeKey("INS", "Ins", 15), 0, 0);
+        Place(top, MakeKey("HOME", "Home", 14), 0, 1);
+        Place(top, MakeKey("PGUP", "PgUp", 14), 0, 2);
+        Place(top, MakeKey("DEL", "Del", 15), 1, 0);
+        Place(top, MakeKey("END", "End", 14), 1, 1);
+        Place(top, MakeKey("PGDN", "PgDn", 14), 1, 2);
 
         var arrows = new Grid { Margin = new Thickness(0, U * 0.6, 0, 0) };
         for (int i = 0; i < 3; i++) arrows.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(U)));
         for (int i = 0; i < 2; i++) arrows.RowDefinitions.Add(new RowDefinition(new GridLength(U)));
         Place(arrows, MakeKey("UP", "↑", 26), 0, 1);
+        Place(arrows, MakeKey("PRTSC", "PrtSc", 12), 0, 2);
         Place(arrows, MakeKey("LEFT", "←", 22), 1, 0);
         Place(arrows, MakeKey("DOWN", "↓", 22), 1, 1);
         Place(arrows, MakeKey("RIGHT", "→", 22), 1, 2);
 
-        return new StackPanel
+        _navPanel = new StackPanel
         {
             Orientation = Orientation.Vertical,
-            Margin = new Thickness(6, 0, 0, 0),
             Children = { top, arrows },
         };
+        ApplyTheme();   // the just-created keys need their themed background applied
     }
 
     private static void Place(Grid g, Key k, int row, int col, int rowSpan = 1, int colSpan = 1)
@@ -524,7 +676,7 @@ public class MainWindow : Window
     {
         _chromeExpanded = on;
         if (_chromeGroup != null) _chromeGroup.IsVisible = on;
-        if (!on) _themePopup.IsOpen = false;
+        if (!on) CloseAllPopups();
         AnchorToMode();
     }
 
@@ -656,6 +808,7 @@ public class MainWindow : Window
         // focused element rather than trusting the event alone.
         while (true)
         {
+            CheckForegroundHkl();   // catches Win+Space layout changes with unchanged focus
             if (currentMode == KeyboardMode.Auto)
             {
                 try { ClassifyAndApply(uia.GetFocusedElementBuildCache(cache), "poll", dedupLog: true); }
@@ -670,6 +823,7 @@ public class MainWindow : Window
     {
         public void HandleFocusChangedEvent(UIA.IUIAutomationElement? sender)
         {
+            owner.CheckForegroundHkl();   // focus moved — the new app may use another layout
             if (owner.currentMode != KeyboardMode.Auto) return;
             if (Diag.On && sender != null) Diag.Focus("[event]" + Environment.NewLine + Diag.Snapshot(sender));
             owner.ClassifyAndApply(sender, "event");
@@ -850,7 +1004,7 @@ public class MainWindow : Window
         _hideTimer.Stop();
         if (currentMode != KeyboardMode.Auto) return;
         if (Environment.TickCount64 < _suppressHideUntil) return;
-        if (_bodyVisible) { _focusEditable = false; _themePopup.IsOpen = false; UpdateGeometry(); }
+        if (_bodyVisible) { _focusEditable = false; CloseAllPopups(); UpdateGeometry(); }
     }
 
     // --- Close confirmation --------------------------------------------------
@@ -920,16 +1074,41 @@ public class MainWindow : Window
         ApplyTheme();   // the just-created keys need their themed background applied
     }
 
-    private void SetLayout(int state)
+    // Recomposes the body from the arrangement fields. Clusters are built once and
+    // re-parented (never rebuilt — keys keep their _allKeys registration and event wiring);
+    // the window then grows/shrinks to fit via SizeToContent and re-pins on the mode button.
+    private void ApplyArrangement()
     {
-        currentLayoutState = state;
-        bool full = state == 1;
-        if (full) BuildNumpad();
-        _numpadGrid.IsVisible = full;   // window grows/shrinks to fit via SizeToContent
+        bool navOn = !_numpadOnly && _navPos != SidePos.Off;
+        bool numOn = _numpadOnly || _numpadPos != SidePos.Off;
+        if (navOn) EnsureNavBuilt();
+        if (numOn) BuildNumpad();
+
+        _bodyRow.Children.Clear();
+        if (_numpadOnly)
+        {
+            _numpadGrid.Margin = default;
+            _bodyRow.Children.Add(_numpadGrid);
+        }
+        else
+        {
+            if (numOn && _numpadPos == SidePos.Left) AddSide(_numpadGrid, left: true);
+            if (navOn && _navPos == SidePos.Left) AddSide(_navPanel!, left: true);
+            _bodyRow.Children.Add(_alphaBlock);
+            if (navOn && _navPos == SidePos.Right) AddSide(_navPanel!, left: false);
+            if (numOn && _numpadPos == SidePos.Right) AddSide(_numpadGrid, left: false);
+        }
+        _numpadGrid.IsVisible = numOn;
 
         foreach (var m in _mods) SetModState(m, ModState.Off, updateLabels: false);
         UpdateKeys();
         AnchorToMode();
+    }
+
+    private void AddSide(Control c, bool left)
+    {
+        c.Margin = left ? new Thickness(0, 0, 6, 0) : new Thickness(6, 0, 0, 0);
+        _bodyRow.Children.Add(c);
     }
 
     private void CycleMode()
@@ -948,7 +1127,7 @@ public class MainWindow : Window
     {
         _hideTimer.Stop();
         UpdateGeometry();
-        if (!_bodyVisible) _themePopup.IsOpen = false;
+        if (!_bodyVisible) CloseAllPopups();
         if (currentMode == KeyboardMode.Hide) TrimWorkingSet();
         UpdateModeButton();
     }
@@ -1012,7 +1191,9 @@ public class MainWindow : Window
             key.SetValue("Sat", currentSat.ToString(inv), RegistryValueKind.String);
             key.SetValue("Brightness", currentBrightness.ToString(inv), RegistryValueKind.String);
             key.SetValue("Opacity", currentOpacity.ToString(inv), RegistryValueKind.String);
-            key.SetValue("Layout", currentLayoutState, RegistryValueKind.DWord);
+            key.SetValue("Nav", (int)_navPos, RegistryValueKind.DWord);
+            key.SetValue("Numpad", (int)_numpadPos, RegistryValueKind.DWord);
+            key.SetValue("NumpadOnly", _numpadOnly ? 1 : 0, RegistryValueKind.DWord);
             key.SetValue("Size", currentSizeState, RegistryValueKind.DWord);
             key.SetValue("Mode", (int)currentMode, RegistryValueKind.DWord);
             key.SetValue("RunOnStartup", runOnStartup ? 1 : 0, RegistryValueKind.DWord);
@@ -1031,12 +1212,23 @@ public class MainWindow : Window
             currentSat = ReadDouble(key, "Sat", 0.0);
             currentBrightness = ReadDouble(key, "Brightness", 1.0);
             currentOpacity = ReadDouble(key, "Opacity", 1.0);
-            int savedLayout = key?.GetValue("Layout") is int l ? l : 0;
+            if (key?.GetValue("Nav") is int nv)
+            {
+                _navPos = (SidePos)Math.Clamp(nv, 0, 2);
+                _numpadPos = (SidePos)Math.Clamp(key.GetValue("Numpad") is int np ? np : 0, 0, 2);
+                _numpadOnly = key.GetValue("NumpadOnly") is int no && no != 0;
+            }
+            else
+            {
+                // Migrate the old two-state "Layout": 0 = keyboard+nav, 1 = keyboard+nav+numpad.
+                _navPos = SidePos.Right;
+                _numpadPos = key?.GetValue("Layout") is int l && l == 1 ? SidePos.Right : SidePos.Off;
+            }
             int savedSize = key?.GetValue("Size") is int sz ? sz : 1;
             int savedMode = key?.GetValue("Mode") is int m ? m : 0;
 
             ApplyTheme();
-            SetLayout(Math.Clamp(savedLayout, 0, 1));
+            ApplyArrangement();
             SetSize(Math.Clamp(savedSize, 0, 2));
 
             currentMode = (KeyboardMode)Math.Clamp(savedMode, 0, 2);
@@ -1102,6 +1294,9 @@ public class MainWindow : Window
         var mod = GetMod(tag);
         if (mod != null) { StartLongPress(mod); return; }
 
+        // Local action: cycle the foreground app's keyboard layout. No send, no auto-repeat.
+        if (tag == "LANG") { CycleInputLayout(); return; }
+
         // Normal key: send now, then auto-repeat while held (so Backspace/Del clear quickly).
         SendTag(tag);
         _repeatTag = tag;
@@ -1125,15 +1320,29 @@ public class MainWindow : Window
 
     private void SendTag(string tag)
     {
+        // Fn layer first (F1–F12 are VKs, not positions), then positional keys as scan codes,
+        // then the fixed-VK table.
+        if (_fn.State != ModState.Off && FnMap.TryGetValue(tag, out var fm)) { SendKey(fm.Vk); return; }
+        if (_defByTag.TryGetValue(tag, out var d) && d.Sc != 0) { SendScan(d.Sc); return; }
         byte vk = GetVirtualKeyCode(tag);
-        if (_fn.State != ModState.Off && FnMap.TryGetValue(tag, out var fm)) vk = fm.Vk;
         if (vk != 0) SendKey(vk);
     }
 
-    private static INPUT KeyInput(ushort vk, bool up) => new()
+    private static INPUT KeyInput(ushort vk, bool up)
+    {
+        uint flags = up ? KEYEVENTF_KEYUP : 0;
+        ushort scan = 0;
+        if (ExtScan.TryGetValue(vk, out byte sc)) { scan = sc; flags |= KEYEVENTF_EXTENDEDKEY; }
+        return new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = vk, wScan = scan, dwFlags = flags } };
+    }
+
+    // Scan-code event: the receiving thread's own layout translates position → VK → char at
+    // delivery time, so positional keys always produce what their label shows, even if the
+    // foreground layout changed between our last relabel and the press.
+    private static INPUT ScanInput(byte sc, bool up) => new()
     {
         type = INPUT_KEYBOARD,
-        ki = new KEYBDINPUT { wVk = vk, dwFlags = up ? KEYEVENTF_KEYUP : 0 },
+        ki = new KEYBDINPUT { wScan = sc, dwFlags = KEYEVENTF_SCANCODE | (up ? KEYEVENTF_KEYUP : 0) },
     };
 
     // Single key event (used to hold/release locked modifiers like a physically held key).
@@ -1143,19 +1352,56 @@ public class MainWindow : Window
         SendInput(1, _inputBuf, InputSize);
     }
 
-    private void SendKey(byte vk)
+    private void SendKey(byte vk) => SendWrapped(KeyInput(vk, false), KeyInput(vk, true));
+    private void SendScan(byte sc) => SendWrapped(ScanInput(sc, false), ScanInput(sc, true));
+
+    private void SendWrapped(INPUT down, INPUT up)
     {
         // Only wrap ONE-SHOT modifiers here; locked ones are already physically held down.
         int n = 0;
         foreach (var m in _mods)
             if (m.State == ModState.OneShot && m.Vk != 0) _inputBuf[n++] = KeyInput(m.Vk, false);
-        _inputBuf[n++] = KeyInput(vk, false);
-        _inputBuf[n++] = KeyInput(vk, true);
+        _inputBuf[n++] = down;
+        _inputBuf[n++] = up;
         for (int i = _mods.Length - 1; i >= 0; i--)
             if (_mods[i].State == ModState.OneShot && _mods[i].Vk != 0) _inputBuf[n++] = KeyInput(_mods[i].Vk, true);
 
         SendInput((uint)n, _inputBuf, InputSize);
         ConsumeOneShotModifiers();
+    }
+
+    // --- Windows keyboard layout (HKL) ----------------------------------------
+    // Cycle the FOREGROUND app's layout — ours never matters, this window is WS_EX_NOACTIVATE
+    // and never foreground. The request is posted (async, refusable), so relabel optimistically
+    // and reconcile shortly after; the UIA-thread checks are the long-term backstop.
+    private void CycleInputLayout()
+    {
+        if (InputLayout.InstalledLayouts().Length <= 1) return;
+        IntPtr fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return;
+
+        IntPtr next = InputLayout.NextLayout(InputLayout.ForegroundHkl());
+        InputLayout.RequestSwitch(fg, next);
+        _activeHkl = next;
+        UpdateKeys();
+        DispatcherTimer.RunOnce(OnHklMaybeChanged, TimeSpan.FromMilliseconds(300));
+    }
+
+    // Called on the UIA thread (focus events + 1 Hz poll): detect foreground layout changes —
+    // including Win+Space with unchanged focus — and hand them to the UI thread exactly once.
+    private void CheckForegroundHkl()
+    {
+        long hkl = InputLayout.ForegroundHkl().ToInt64();
+        if (Interlocked.Exchange(ref _lastSeenHkl, hkl) == hkl) return;
+        Dispatcher.UIThread.Post(OnHklMaybeChanged);
+    }
+
+    private void OnHklMaybeChanged()
+    {
+        IntPtr hkl = InputLayout.ForegroundHkl();
+        if (hkl == _activeHkl) return;
+        _activeHkl = hkl;
+        UpdateKeys();
     }
 
     // --- Modifier state ------------------------------------------------------
@@ -1206,58 +1452,43 @@ public class MainWindow : Window
     {
         bool isShifted = _shift.State != ModState.Off;
         bool isFn = _fn.State != ModState.Off;
+        var glyphs = InputLayout.Table(_activeHkl, PositionalScans);
 
         foreach (var k in _allKeys)
         {
             string tag = k.KeyTag;
             string label =
                 isFn && FnMap.TryGetValue(tag, out var fm) ? fm.Label :
-                tag.Length == 1 && tag[0] is >= 'A' and <= 'Z' ? (isShifted ? tag : char.ToLowerInvariant(tag[0]).ToString()) :
-                tag.Length == 1 && tag[0] is >= '0' and <= '9' ? (isShifted ? ShiftedDigit[tag[0] - '0'] : tag) :
-                Punct.TryGetValue(tag, out var p) ? (isShifted ? p.Shifted : p.Normal) :
-                k.DefaultLabel;
+                tag == "LANG" ? InputLayout.ShortName(_activeHkl) :
+                _defByTag.TryGetValue(tag, out var d) && d.Sc != 0 && glyphs.TryGetValue(d.Sc, out var g)
+                    ? (isShifted ? g.Shifted : g.Normal)
+                    : k.DefaultLabel;
             k.SetLabel(label);
         }
     }
 
     // --- Lookup tables -------------------------------------------------------
-    private static readonly Dictionary<string, (string Normal, string Shifted)> Punct = new()
-    {
-        ["COMMA"] = (",", "<"), ["PERIOD"] = (".", ">"), ["SLASH"] = ("/", "?"),
-        ["GRAVE"] = ("`", "~"), ["MINUS"] = ("-", "_"), ["EQUALS"] = ("=", "+"), ["BACKSLASH"] = ("\\", "|"),
-    };
-
     private static readonly Dictionary<string, byte> Vk = new()
     {
-        ["COMMA"] = 0xBC, ["PERIOD"] = 0xBE, ["SLASH"] = 0xBF, ["GRAVE"] = 0xC0,
-        ["MINUS"] = 0xBD, ["EQUALS"] = 0xBB, ["BACKSLASH"] = 0xDC,
         ["BACK"] = 0x08, ["TAB"] = 0x09, ["ENTER"] = 0x0D, ["ESC"] = 0x1B, ["SPACE"] = 0x20,
         ["LEFT"] = 0x25, ["UP"] = 0x26, ["RIGHT"] = 0x27, ["DOWN"] = 0x28,
         ["PGUP"] = 0x21, ["PGDN"] = 0x22, ["END"] = 0x23, ["HOME"] = 0x24,
+        ["PRTSC"] = 0x2C, ["INS"] = 0x2D, ["DEL"] = 0x2E, ["APPS"] = 0x5D,
         ["NUMLK"] = 0x90, ["NUMSLASH"] = 0x6F, ["NUMSTAR"] = 0x6A, ["NUMMINUS"] = 0x6D, ["NUMPLUS"] = 0x6B,
         ["NUM0"] = 0x60, ["NUM1"] = 0x61, ["NUM2"] = 0x62, ["NUM3"] = 0x63, ["NUM4"] = 0x64,
         ["NUM5"] = 0x65, ["NUM6"] = 0x66, ["NUM7"] = 0x67, ["NUM8"] = 0x68, ["NUM9"] = 0x69, ["NUMDOT"] = 0x6E,
     };
 
+    // Fn layer, keyed by the positional tags of the number row (F-keys are VKs, not positions).
     private static readonly Dictionary<string, (byte Vk, string Label)> FnMap = new()
     {
-        ["1"] = (0x70, "F1"), ["2"] = (0x71, "F2"), ["3"] = (0x72, "F3"), ["4"] = (0x73, "F4"),
-        ["5"] = (0x74, "F5"), ["6"] = (0x75, "F6"), ["7"] = (0x76, "F7"), ["8"] = (0x77, "F8"),
-        ["9"] = (0x78, "F9"), ["0"] = (0x79, "F10"), ["MINUS"] = (0x7A, "F11"), ["EQUALS"] = (0x7B, "F12"),
+        ["SC02"] = (0x70, "F1"), ["SC03"] = (0x71, "F2"), ["SC04"] = (0x72, "F3"), ["SC05"] = (0x73, "F4"),
+        ["SC06"] = (0x74, "F5"), ["SC07"] = (0x75, "F6"), ["SC08"] = (0x76, "F7"), ["SC09"] = (0x77, "F8"),
+        ["SC0A"] = (0x78, "F9"), ["SC0B"] = (0x79, "F10"), ["SC0C"] = (0x7A, "F11"), ["SC0D"] = (0x7B, "F12"),
         ["BACK"] = (0x2E, "Del"),
     };
 
-    private static readonly string[] ShiftedDigit = { ")", "!", "@", "#", "$", "%", "^", "&", "*", "(" };
-
-    private static byte GetVirtualKeyCode(string keyTag)
-    {
-        if (keyTag.Length == 1)
-        {
-            char c = keyTag[0];
-            if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return (byte)c;
-        }
-        return Vk.TryGetValue(keyTag, out byte v) ? v : (byte)0;
-    }
+    private static byte GetVirtualKeyCode(string keyTag) => Vk.TryGetValue(keyTag, out byte v) ? v : (byte)0;
 }
 
 // Int aliases for the interop UIA property / control-type enum ids (every use would
