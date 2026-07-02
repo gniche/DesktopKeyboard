@@ -66,12 +66,28 @@ internal sealed class TouchSlider : Panel
         return s;
     }
 
+    // A finger that stops between two steps must not oscillate between them: each stepped
+    // change here resizes the window, which shifts this slider (it lives in the popup) under
+    // the finger — a feedback loop that makes adjacent steps "fight". So a drag keeps the
+    // current step until the finger moves clearly past a boundary (> 0.5 + Hysteresis steps).
+    private const double Hysteresis = 0.15;
     private void SetFromPointer(double x)
     {
         double w = Bounds.Width;
         if (w <= 0) return;
         double frac = Math.Clamp(x / w, 0, 1);
-        double v = Clamp(Minimum + frac * (Maximum - Minimum));
+        double raw = Minimum + frac * (Maximum - Minimum);
+
+        double v;
+        if (Step > 0)
+        {
+            double steps = (raw - Minimum) / Step;
+            double cur = Math.Round((_value - Minimum) / Step);
+            double target = Math.Abs(steps - cur) > 0.5 + Hysteresis ? Math.Round(steps) : cur;
+            v = Math.Clamp(Minimum + target * Step, Minimum, Maximum);
+        }
+        else v = Math.Clamp(raw, Minimum, Maximum);
+
         if (v != _value) { _value = v; UpdateThumb(); ValueChanged?.Invoke(v); }
     }
 
